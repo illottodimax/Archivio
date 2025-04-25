@@ -1003,16 +1003,48 @@ def ottieni_numeri_proposti():
 def custom_loss_function(y_true, y_pred):
     """
     Una funzione di loss personalizzata che penalizza sia l'errore di previsione
-    che la ripetizione dei numeri.
+    che la ripetizione dei numeri (mancanza di diversità).
+
+    *** VERSIONE MODIFICATA CON PENALITÀ DIVERSITÀ AUMENTATA ***
     """
-    mse = tf.reduce_mean(tf.square(y_true - y_pred))
-    mae = tf.reduce_mean(tf.abs(y_true - y_pred))
+    # --- Calcolo Loss di Accuratezza (MSE + MAE) ---
+    mse = tf.reduce_mean(tf.square(y_true - y_pred), axis=-1) # Calcola per campione
+    mae = tf.reduce_mean(tf.abs(y_true - y_pred), axis=-1)    # Calcola per campione
     base_loss = mse + 0.5 * mae
+    # Media sul batch
+    mean_base_loss = tf.reduce_mean(base_loss)
 
-    pred_variance = tf.math.reduce_variance(y_pred, axis=1)
-    diversity_penalty = 0.1 / (pred_variance + 1e-8)
+    # --- Calcolo Penalità per Mancanza di Diversità ---
+    # Calcola la varianza lungo l'asse delle predizioni (axis=1 se y_pred è [batch, 5])
+    # Assicurati che l'asse sia corretto per la tua shape di y_pred
+    pred_variance = tf.math.reduce_variance(y_pred, axis=-1) # Varianza tra i 5 numeri predetti per ogni campione
 
-    return base_loss + 0.05 * diversity_penalty
+    # La penalità diventa GRANDE quando la varianza è PICCOLA
+    # Aggiungi epsilon per stabilità numerica (evita divisione per zero)
+    epsilon = K.epsilon() # Valore piccolo standard di Keras/TF (es. 1e-7)
+
+    # --- AUMENTA QUESTO PESO ---
+    # Valori suggeriti da provare: 0.1, 0.15, 0.2, 0.25
+    # Inizia con un aumento significativo per vedere l'effetto.
+    diversity_penalty_weight = 0.15 # <--- MODIFICA QUI IL PESO!
+    # ---------------------------
+
+    # Calcola la penalità per campione
+    # Usiamo 1/varianza: più la varianza è bassa, più la penalità è alta
+    # Moltiplichiamo per un piccolo fattore (es. 0.1) per scalare, poi per il peso
+    diversity_penalty_term = 0.1 / (pred_variance + epsilon)
+    diversity_penalty_per_sample = diversity_penalty_weight * diversity_penalty_term
+
+    # Media sul batch
+    mean_diversity_penalty = tf.reduce_mean(diversity_penalty_per_sample)
+
+    # --- Loss Finale ---
+    final_loss = mean_base_loss + mean_diversity_penalty
+
+    # Log (opzionale, utile per il debug durante l'addestramento se usi custom training loop)
+    # tf.print("Mean Base Loss:", mean_base_loss, "Mean Diversity Penalty:", mean_diversity_penalty, "Total Loss:", final_loss)
+
+    return final_loss
 
 def carica_dati(ruota, start_date, end_date):
     """
@@ -2335,7 +2367,7 @@ def analisi_avanzata_completa():
 
         # Generazione Numeri Finali
         numeri_frequenti = estrai_numeri_frequenti(ruota, start_date, end_date, n=20)
-        numeri_finali, origine_ml = genera_numeri_attendibili(numeri_interi, attendibility_score, numeri_frequenti)
+        numeri_finali, origine_ml = genera_numeri_attendibili_modificata(numeri_interi, attendibility_score, numeri_frequenti)
         textbox.insert(tk.END, "Numeri predetti: " + ", ".join(map(str, numeri_finali)) + "\n")
         mostra_numeri_forti_popup(numeri_finali, attendibility_score, origine_ml)
 
@@ -2779,14 +2811,18 @@ def analisi_interpretabile():
     """
     Esegue analisi interpretabile, addestramento semplificato, predizione,
     spiegazione e mostra il popup con i numeri finali.
+    *** VERSIONE CORRETTA con chiamata a genera_numeri_attendibili_modificata ***
     """
-    global numeri_finali, ruota_selezionata, textbox, config, entry_start_date, entry_end_date, entry_epochs, entry_batch_size, root
+    global numeri_finali, ruota_selezionata, textbox, config, entry_start_date, entry_end_date, entry_epochs, entry_batch_size, root, btn_start, pulsanti_ruote # Assicurati che siano tutte quelle usate
+    global scaler_X # Aggiungi scaler_X se serve nel blocco finally o altrove
     analysis_successful = False
     model = None
     numeri_finali = None # Inizializza
     attendibility_score = 0 # Inizializza
     commento = "N/D" # Inizializza
     log_file = None  # Inizializza log_file a None per evitare NameError
+    feature_importances = None # Inizializza
+    history = None # Inizializza
 
     # Prendi ruota per il finally (se necessario riabilitare UI)
     current_ruota_name = ruota_selezionata.get()
@@ -2801,108 +2837,166 @@ def analisi_interpretabile():
             end_date = pd.to_datetime(entry_end_date.get_date())
             if start_date >= end_date: raise ValueError("Data inizio >= data fine.")
             epochs = int(entry_epochs.get()); batch_size = int(entry_batch_size.get())
-            dense_layers_cfg = config.dense_layers; dropout_rates_cfg = config.dropout_rates
+            # Usa i layer/dropout dalla config globale (già validati/impostati dalla GUI)
+            dense_layers_cfg = config.dense_layers
+            dropout_rates_cfg = config.dropout_rates
             if epochs <=0 or batch_size <=0: raise ValueError("Epochs/Batch Size > 0.")
         except Exception as e: log_debug(f"ERRORE parametri: {e}"); messagebox.showerror("Errore Parametri", f"Parametri input non validi:\n{e}"); raise
 
         # --- Disabilita UI / Pulisci Textbox ---
         textbox.delete(1.0, tk.END); textbox.insert(tk.END, "Avvio analisi interpretabile...\n"); textbox.update()
         log_debug("Interfaccia aggiornata per analisi interpretabile.")
+        # Esempio disabilitazione UI
+        for rb in pulsanti_ruote.values():
+            if rb.winfo_exists(): rb.config(state="disabled")
+        if btn_start.winfo_exists(): btn_start.config(text="ELABORAZIONE...", state="disabled", bg="#cccccc")
+        if root.winfo_exists(): root.update()
 
         # --- Caricamento e Preparazione Dati ---
         log_debug(f"Caricamento dati per {ruota} da {start_date.strftime('%Y/%m/%d')} a {end_date.strftime('%Y/%m/%d')}...")
-        y_norm_original, y_orig_all, scaler_y, df_preproc = carica_dati(ruota, start_date, end_date)
+        # Nota: carica_dati restituisce (numeri_normalizzati, numeri, scaler, df_preproc)
+        # Qui usiamo y_orig_all per i numeri originali, scaler_y per lo scaler target
+        _, y_orig_all, scaler_y, df_preproc = carica_dati(ruota, start_date, end_date) # Modificato per usare carica_dati
         if df_preproc is None: raise ValueError(f"Caricamento/preprocessamento fallito per {ruota}.")
-        if scaler_y is None: raise ValueError("Scaler per target non restituito.");
-        if y_orig_all is None: raise ValueError("Target originali non restituiti.");
+        if scaler_y is None: raise ValueError("Scaler per target (scaler_y) non restituito da carica_dati.");
+        if y_orig_all is None: raise ValueError("Target originali (y_orig_all) non restituiti da carica_dati.");
 
         # --- Creazione Feature e Nomi ---
         log_debug("Creazione features di input (X)...")
         feature_list_names = []; temp_df_features = pd.DataFrame(index=df_preproc.index)
-        LAGS_TO_USE=[1,2,3]; # Esempio lags
+        LAGS_TO_USE=[1, 2, 3]; # Esempio lags
         for lag in LAGS_TO_USE:
-            for i in range(1, 6): col_name=f'Num{i}_lag{lag}'; temp_df_features[col_name]=df_preproc[f'Num{i}'].shift(lag); feature_list_names.append(col_name)
-        temp_df_features['Month_Sin']=np.sin(2*np.pi*df_preproc.index.month/12); feature_list_names.append('Month_Sin')
-        temp_df_features['Month_Cos']=np.cos(2*np.pi*df_preproc.index.month/12); feature_list_names.append('Month_Cos')
-        # ... (Aggiungi altre feature se necessario) ...
+            for i in range(1, 6):
+                 col_name=f'Num{i}_lag{lag}'
+                 # Usa df_preproc che ora contiene le colonne Num1-5
+                 temp_df_features[col_name]=df_preproc[f'Num{i}'].shift(lag)
+                 feature_list_names.append(col_name)
+        # Aggiungi feature temporali (se presenti in df_preproc)
+        # Assumiamo che carica_dati chiami internamente aggiungi_feature_temporali o simili
+        temporal_cols_to_use = ['giorno_sett_sin', 'giorno_sett_cos', 'mese_sin', 'mese_cos', 'giorno_mese_sin', 'giorno_mese_cos']
+        for col in temporal_cols_to_use:
+             if col in df_preproc.columns:
+                 temp_df_features[col] = df_preproc[col]
+                 feature_list_names.append(col)
         log_debug("Feature temporali e lag create.")
 
         # --- Allineamento e Drop NaN ---
+        # y_orig_all dovrebbe già essere allineato con df_preproc da carica_dati
         y_orig_df = pd.DataFrame(y_orig_all, index=df_preproc.index, columns=[f'Num{i}' for i in range(1, 6)])
-        combined_data = pd.concat([temp_df_features, y_orig_df], axis=1); combined_data.dropna(inplace=True)
-        if combined_data.empty: raise ValueError("Nessun dato valido dopo allineamento features.")
-        X_final_df = combined_data[feature_list_names]; y_final_df = combined_data[[f'Num{i}' for i in range(1, 6)]]
-        X_np = X_final_df.values; y_np = y_final_df.values
-        scaler_X = MinMaxScaler(feature_range=(0, 1)); X_scaled = scaler_X.fit_transform(X_np)
-        y_scaled = scaler_y.transform(y_np) # Usa scaler_y da carica_dati
+        combined_data = pd.concat([temp_df_features, y_orig_df], axis=1)
+        combined_data.dropna(inplace=True) # Rimuove righe con NaN (dovuti ai lag)
+        if combined_data.empty: raise ValueError("Nessun dato valido dopo allineamento features e dropna.")
+
+        X_final_df = combined_data[feature_list_names]
+        y_final_df = combined_data[[f'Num{i}' for i in range(1, 6)]]
+        X_np = X_final_df.values
+        y_np = y_final_df.values # y originali (1-90) allineati con X
+
+        # Scaling X e y
+        scaler_X = MinMaxScaler(feature_range=(0, 1)) # Scaler per le feature X
+        X_scaled = scaler_X.fit_transform(X_np)
+        y_scaled = scaler_y.transform(y_np) # Usa scaler_y restituito da carica_dati per scalare y a [0,1]
+
         log_debug("Feature Engineering completato."); log_debug(f"Feature Names: {feature_list_names}"); log_debug(f"X_scaled shape: {X_scaled.shape}, y_scaled shape: {y_scaled.shape}")
 
         # --- Info Base ---
         textbox.insert(tk.END, f"Analisi interpretabile per ruota: {ruota}\n");
-        textbox.insert(tk.END, f"Periodo dati effettivo: {combined_data.index.min().strftime('%Y/%m/%d')} - {combined_data.index.max().strftime('%Y/%m/%d')}\n")
-        textbox.insert(tk.END, f"Estrazioni per modello: {len(X_scaled)}\n\n"); textbox.update()
+        textbox.insert(tk.END, f"Periodo dati effettivo (dopo lag/dropna): {combined_data.index.min().strftime('%Y/%m/%d')} - {combined_data.index.max().strftime('%Y/%m/%d')}\n")
+        textbox.insert(tk.END, f"Estrazioni usate per modello: {len(X_scaled)}\n\n"); textbox.update()
 
         # --- Split Train/Val ---
-        if len(X_scaled) < 10: X_train, X_val = X_scaled, X_scaled; y_train, y_val = y_scaled, y_scaled
-        else: split_idx = int(len(X_scaled) * 0.8); X_train, X_val = X_scaled[:split_idx], X_scaled[split_idx:]; y_train, y_val = y_scaled[:split_idx], y_scaled[split_idx:]
-        log_debug(f"Split dati: Train={len(X_train)}, Val={len(X_val)}")
+        if len(X_scaled) < 10: # Se pochi dati, usa tutto per train e val (non ideale ma evita errori)
+            X_train, X_val = X_scaled, X_scaled
+            y_train, y_val = y_scaled, y_scaled
+            log_debug("Split dati: Dati insufficienti (<10), usando tutto per train e val.")
+        else:
+            split_idx = int(len(X_scaled) * 0.8)
+            X_train, X_val = X_scaled[:split_idx], X_scaled[split_idx:]
+            y_train, y_val = y_scaled[:split_idx], y_scaled[split_idx:]
+            log_debug(f"Split dati: Train={len(X_train)}, Val={len(X_val)}")
 
         # --- Addestramento Modello ---
         textbox.insert(tk.END, f"Addestramento modello ({epochs} epochs)...\n"); textbox.update()
         input_shape=(X_train.shape[1],); output_shape=y_train.shape[1]
-        model = build_model(input_shape, output_shape, dense_layers_cfg, dropout_rates_cfg)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+        # Usa le config globali per layers/dropout
+        model = build_model(input_shape, output_shape, config.dense_layers, config.dropout_rates)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001) # Optimizer semplice
+        # Usa la loss scelta dalla config
         loss_function_to_use = config.loss_function_choice if config.loss_function_choice and not config.use_custom_loss else "mean_squared_error"
-        if config.use_custom_loss: loss_function_to_use = custom_loss_function
+        if config.use_custom_loss: loss_function_to_use = custom_loss_function # Assumi definita
         model.compile(optimizer=optimizer, loss=loss_function_to_use, metrics=["mae"])
-        callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)]
-        history = model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=0)
+
+        callbacks = []
+        if len(X_val) > 0: # Aggiungi callback solo se c'è validation set
+             callbacks.append(tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True))
+
+        # Addestra usando i dati scalati (X_train, y_train)
+        history = model.fit(X_train, y_train,
+                            validation_data=(X_val, y_val) if len(X_val) > 0 else None, # Passa validation solo se esiste
+                            epochs=epochs,
+                            batch_size=batch_size,
+                            callbacks=callbacks,
+                            verbose=0)
         textbox.insert(tk.END, "Addestramento completato.\n"); textbox.update()
 
         # --- Predizione ---
-        log_debug("Esecuzione Predizione..."); X_pred_input = X_scaled[-1:]
-        predizione_scaled = model.predict(X_pred_input)[0]
+        log_debug("Esecuzione Predizione..."); X_pred_input = X_scaled[-1:] # Ultimo campione scalato
+        predizione_scaled = model.predict(X_pred_input)[0] # Predizione scalata [0,1]
+        # Denormalizza usando lo scaler di y (scaler_y)
         numeri_denormalizzati = scaler_y.inverse_transform(predizione_scaled.reshape(1, -1))
         numeri_interi = np.round(numeri_denormalizzati).astype(int).flatten(); numeri_interi = np.clip(numeri_interi, 1, 90)
-        log_debug(f"Predizione (interi): {numeri_interi}")
+        log_debug(f"Predizione (interi post-arrotondamento): {numeri_interi}")
 
         # --- Generazione Numeri Finali e Attendibilità ---
         log_debug("Generazione Numeri Finali e Attendibilità...")
         attendibility_score, commento = valuta_attendibilita(history.history) # Usa history semplice
         numeri_frequenti = estrai_numeri_frequenti(ruota, start_date, end_date, n=20)
-        numeri_finali, origine_ml = genera_numeri_attendibili(numeri_interi, attendibility_score, numeri_frequenti)
+
+        # === MODIFICA QUI ===
+        # Chiama la NUOVA funzione modificata
+        numeri_finali, origine_ml = genera_numeri_attendibili_modificata(numeri_interi, attendibility_score, numeri_frequenti)
+        # === FINE MODIFICA ===
+
         textbox.insert(tk.END, "Numeri predetti finali: " + ", ".join(map(str, numeri_finali)) + "\n")
-        mostra_numeri_forti_popup(numeri_finali, attendibility_score, origine_ml)
+        mostra_numeri_forti_popup(numeri_finali, attendibility_score, origine_ml) # Assumi definita
         log_debug(f"Numeri Finali Generati: {numeri_finali}")
 
         # --- Analisi Importanza Feature ---
-        log_debug("Analisi Importanza Feature..."); feature_importances = None
-        try: importanze = analizza_importanza_feature_primo_layer(model, feature_list_names); feature_importances = importanze
+        log_debug("Analisi Importanza Feature...");
+        try:
+             # Usa feature_list_names che contiene i nomi corretti delle feature usate
+             importanze = analizza_importanza_feature_primo_layer(model, feature_list_names)
+             feature_importances = importanze # Salva per spiegazione
+             log_debug(f"Importanza Feature calcolata: {feature_importances}")
+        except NameError: log_debug("ERRORE: Funzione 'analizza_importanza_feature_primo_layer' non definita!")
         except Exception as fi_err: log_debug(f"Warning: Errore analisi importanza: {fi_err}")
 
         # --- Generazione Spiegazione ---
         log_debug("Generazione Spiegazione..."); textbox.insert(tk.END, "Generazione spiegazione...\n"); textbox.update()
         try:
-            spiegazione = genera_spiegazione_predizione(numeri_finali, feature_importances, start_date, end_date, ruota)
+            # Passa feature_importances calcolate
+            spiegazione = genera_spiegazione_predizione(numeri_finali, feature_importances, start_date, end_date, ruota) # Assumi definita
             textbox.insert(tk.END, "\n=== SPIEGAZIONE INTERPRETABILE ===\n\n"); textbox.insert(tk.END, spiegazione + "\n"); textbox.update()
             log_debug("Spiegazione generata e inserita.")
         except NameError as ne: log_debug(f"ERRORE: Funzione spiegazione mancante: {ne}"); messagebox.showerror("Errore Interno", f"Funzione necessaria non trovata: {ne}.");
         except Exception as spieg_err: log_debug(f"ERRORE generazione spiegazione: {spieg_err}"); messagebox.showerror("Errore Spiegazione", f"Errore: {spieg_err}");
 
         # --- Visualizzazione Grafico Loss ---
-        try: mostra_grafico_semplificato(history.history)
+        try:
+             if history: mostra_grafico_semplificato(history.history) # Assumi definita
+             else: log_debug("Warning: 'history' non disponibile per grafico loss.")
         except Exception as vis_err: log_debug(f"Warning: Errore grafico loss: {vis_err}")
 
         analysis_successful = True
-        log_debug("Blocco try principale completato con successo.")
+        log_debug("Blocco try principale completato con successo (analisi interpretabile).")
 
     # === GESTIONE ERRORI ===
     except ValueError as val_err:
-         error_message = str(val_err); log_debug(f"ERRORE ValueError: {error_message}")
+         error_message = str(val_err); log_debug(f"ERRORE ValueError (interpretabile): {error_message}")
          messagebox.showerror("Errore Dati/Valore", f"Si è verificato un errore:\n\n{error_message}")
     except Exception as e:
         error_type = type(e).__name__; error_msg = str(e); detailed_error = traceback.format_exc()
-        log_debug(f"ERRORE IMPREVISTO: {error_type} - {error_msg}\n{detailed_error}")
+        log_debug(f"ERRORE IMPREVISTO (interpretabile): {error_type} - {error_msg}\n{detailed_error}")
         textbox.insert(tk.END, f"\n--- ERRORE IMPREVISTO ---\n{error_type}: {error_msg}\n--------------------------\n")
         messagebox.showerror("Errore Inatteso", f"Errore imprevisto.\nDettagli nel log/textbox.\n\n({error_type})")
 
@@ -2910,22 +3004,18 @@ def analisi_interpretabile():
     finally:
         # Riabilita Interfaccia (se era stata disabilitata)
         log_debug("Riabilitazione interfaccia (analisi interpretabile)...")
-        # ... (Aggiungi qui codice per riabilitare pulsanti/bottone se li avevi disabilitati all'inizio) ...
         try: # Esempio riabilitazione
              for rb in pulsanti_ruote.values():
                   if rb.winfo_exists(): rb.config(state="normal")
              if btn_start.winfo_exists():
                   btn_start.config(text=f"AVVIA ELABORAZIONE ({current_ruota_name})", state="normal", bg="#4CAF50")
              if root.winfo_exists(): root.update()
-        except Exception as ui_err: log_debug(f"Errore riabilitazione UI: {ui_err}")
+        except Exception as ui_err: log_debug(f"Errore riabilitazione UI (interpretabile): {ui_err}")
 
-        # Verifica se log_file esiste e chiudilo solo in quel caso
-        if 'log_file' in globals() and log_file is not None:
-            try:
-                log_file.close()
-                log_debug("File di log chiuso.")
-            except Exception as log_err:
-                log_debug(f"Errore chiusura file log: {log_err}")
+        # Verifica se log_file esiste e chiudilo solo in quel caso (se lo usi)
+        # if 'log_file' in globals() and log_file is not None:
+        #    try: log_file.close(); log_debug("File di log chiuso.")
+        #    except Exception as log_err: log_debug(f"Errore chiusura file log: {log_err}")
 
     # === RITORNO FINALE ===
     if analysis_successful:
@@ -2938,7 +3028,7 @@ def analisi_interpretabile():
         textbox.see(tk.END); textbox.update()
         log_debug("Ritorno None (analisi interpretabile fallita).")
         return None
-# --- Assicurati che le altre funzioni siano definite ---
+# --- Fine funzione analisi_interpretabile ---
 
 def visualizza_semplice_interpretazione(numeri_predetti, numeri_frequenti):
     """
@@ -4247,80 +4337,96 @@ def filtra_duplicati(numeri_predetti, n=5):
 
     return np.array(numeri_unici[:n])
 
-def genera_numeri_attendibili(numeri_interi, attendibility_score, numeri_frequenti):
+def genera_numeri_attendibili_modificata(numeri_interi, attendibility_score, numeri_frequenti):
     """
     Genera una lista di numeri attendibili combinando i numeri predetti dal modello
-    con i numeri più frequenti, in base all'attendibilità della previsione.
-    
-    NUOVA VERSIONE:  Gestisce correttamente i numeri interi (già denormalizzati e arrotondati).
-                     Ritorna anche l'informazione sull'origine di ciascun numero.
+    con i numeri più frequenti, introducendo più varietà a bassa attendibilità.
+
     Args:
-        numeri_interi (np.ndarray): Numeri predetti (interi, 1-90, shape (1, 5)).
+        numeri_interi (np.ndarray): Numeri predetti (interi, 1-90, shape (1, 5) o 1D).
         attendibility_score (float): Punteggio di attendibilità (0-100).
         numeri_frequenti (list): Lista dei numeri più frequenti (interi, 1-90).
 
     Returns:
         tuple: (list di 5 numeri attendibili (interi, 1-90), list di booleani indicanti se provengono dal ML)
     """
+    print(f"DEBUG: genera_numeri_attendibili_modificata chiamato con attendibility_score = {attendibility_score:.2f}") # Debug score
     SOGLIA_ATTENDIBILITA = 60
     NUM_NUMERI_FINALI = 5
+    MAX_ML_BASSA_ATTENDIBILITA = 3 # Quanti numeri prendere dal ML se l'attendibilità è bassa
 
     # --- Gestione Input ---
-    # Assicurati che numeri_interi sia un array NumPy 1D.
     if isinstance(numeri_interi, list):
-        numeri_interi = np.array(numeri_interi)  # Converti in array NumPy
-    numeri_interi = numeri_interi.flatten() #appiattisci
-
-    # Rimuovi eventuali numeri non validi (fuori range o NaN)
-    numeri_interi = [num for num in numeri_interi if isinstance(num, (int, np.integer)) and 1 <= num <= 90]
+        numeri_interi = np.array(numeri_interi)
+    numeri_interi = numeri_interi.flatten()
+    numeri_interi_validi = [int(num) for num in numeri_interi if isinstance(num, (int, np.integer, float)) and not np.isnan(num) and 1 <= int(num) <= 90]
+    print(f"DEBUG: Numeri interi validi dal modello: {numeri_interi_validi}") # Debug numeri modello
 
     # --- Logica di Selezione ---
     numeri_finali = []
-    # Lista per tenere traccia dell'origine di ciascun numero (True = ML, False = frequente/casuale)
     origine_ml = []
 
-    if attendibility_score >= SOGLIA_ATTENDIBILITA:  # Alta attendibilità
-        # Usa i numeri predetti, poi aggiungi dai frequenti se necessario.
-        for num in numeri_interi:
-            if num not in numeri_finali:
-                numeri_finali.append(int(num))
-                origine_ml.append(True)  # Questo numero proviene dal ML
-                if len(numeri_finali) >= NUM_NUMERI_FINALI:
-                    break
-        
-        # Aggiungi numeri frequenti finché non ne abbiamo 5, evitando duplicati
-        for num in numeri_frequenti:
+    if attendibility_score >= SOGLIA_ATTENDIBILITA:
+        print("DEBUG: Logica Alta Attendibilità")
+        # 1. Alta Attendibilità: Priorità al ML
+        for num in numeri_interi_validi:
             if num not in numeri_finali:
                 numeri_finali.append(num)
-                origine_ml.append(False)  # Questo numero proviene dalla lista frequenti
+                origine_ml.append(True) # Origine: ML
                 if len(numeri_finali) >= NUM_NUMERI_FINALI:
                     break
-    else:  # Bassa attendibilità
-        # Usa principalmente i numeri frequenti, poi aggiungi alcuni predetti.
-        for num in numeri_frequenti[:2]:  # Primi 2 frequenti
-            if num not in numeri_finali:
-                numeri_finali.append(num)
-                origine_ml.append(False)  # Questo numero proviene dalla lista frequenti
-        
-        for num in numeri_interi:  # Aggiungi numeri dal ML
-            if num not in numeri_finali:
-                numeri_finali.append(int(num))
-                origine_ml.append(True)  # Questo numero proviene dal ML
-            if len(numeri_finali) >= 4:  # frequenti + predetti = 4
-                break
-        
-        # Completa con numeri casuali (se necessario)
-        while len(numeri_finali) < NUM_NUMERI_FINALI:
-            num_casuale = random.randint(1, 90)
-            if num_casuale not in numeri_finali:
-                numeri_finali.append(num_casuale)
-                origine_ml.append(False)  # Numero casuale, non dal ML
 
-    # Assicurati che siano esattamente 5, e che siano interi
+        # 2. Completa con frequenti (se necessario)
+        if len(numeri_finali) < NUM_NUMERI_FINALI:
+            print(f"DEBUG: Completamento Alta Attendibilità con Frequenti (mancano {NUM_NUMERI_FINALI - len(numeri_finali)} num)")
+            for num in numeri_frequenti:
+                if num not in numeri_finali:
+                    numeri_finali.append(num)
+                    origine_ml.append(False) # Origine: Frequenti
+                    if len(numeri_finali) >= NUM_NUMERI_FINALI:
+                        break
+
+    else:
+        print("DEBUG: Logica Bassa Attendibilità")
+        # 1. Bassa Attendibilità: Prendi fino a MAX_ML_BASSA_ATTENDIBILITA dal ML
+        ml_count = 0
+        for num in numeri_interi_validi:
+            if num not in numeri_finali and ml_count < MAX_ML_BASSA_ATTENDIBILITA:
+                numeri_finali.append(num)
+                origine_ml.append(True) # Origine: ML
+                ml_count += 1
+                if len(numeri_finali) >= NUM_NUMERI_FINALI:
+                    break
+        print(f"DEBUG: Numeri dal ML (bassa attendibilità): {ml_count}")
+
+        # 2. Completa CASUALMENTE dai frequenti (se necessario)
+        if len(numeri_finali) < NUM_NUMERI_FINALI:
+            print(f"DEBUG: Completamento Bassa Attendibilità con Frequenti Casuali (mancano {NUM_NUMERI_FINALI - len(numeri_finali)} num)")
+            # Crea una copia shufflata dei numeri frequenti per la selezione casuale
+            frequenti_shuffled = random.sample(numeri_frequenti, len(numeri_frequenti))
+            for num in frequenti_shuffled:
+                if num not in numeri_finali:
+                    numeri_finali.append(num)
+                    origine_ml.append(False) # Origine: Frequenti (selezionato casualmente)
+                    if len(numeri_finali) >= NUM_NUMERI_FINALI:
+                        break
+
+    # 3. Completa con casuali (fallback finale per entrambi i casi, se ancora mancano)
+    print(f"DEBUG: Controllo finale (numeri attuali: {len(numeri_finali)})")
+    while len(numeri_finali) < NUM_NUMERI_FINALI:
+        print(f"DEBUG: Completamento con Casuali (mancano {NUM_NUMERI_FINALI - len(numeri_finali)} num)")
+        num_casuale = random.randint(1, 90)
+        if num_casuale not in numeri_finali:
+            numeri_finali.append(num_casuale)
+            origine_ml.append(False) # Origine: Casuale
+
+    # Assicurati che siano esattamente 5 (anche se la logica sopra dovrebbe già farlo)
     numeri_finali = numeri_finali[:NUM_NUMERI_FINALI]
     origine_ml = origine_ml[:NUM_NUMERI_FINALI]
-    
-    # Ritorna sia i numeri finali che la loro origine
+
+    print(f"DEBUG: Numeri Finali Restituiti: {numeri_finali}") # Debug risultato finale
+    print(f"DEBUG: Origine ML: {origine_ml}") # Debug origine
+
     return numeri_finali, origine_ml
 
 def genera_spiegazione_predizione(numeri_predetti, feature_importanze, start_date, end_date, ruota):
@@ -4439,11 +4545,12 @@ def genera_spiegazione_predizione(numeri_predetti, feature_importanze, start_dat
     # --- Ritorno: Unisci le spiegazioni di tutti i numeri ---
     return "\n\n".join(spiegazioni)
 
+
 def mostra_numeri_forti_popup(numeri_finali, attendibility_score, origine_ml=None):
     """
     Mostra un popup con i numeri finali, evidenziando in rosso quelli derivati dal modello ML
-    e in nero quelli derivati dai numeri frequenti.
-    
+    e in nero quelli derivati dai numeri frequenti/casuali.
+
     Args:
         numeri_finali (list): Lista dei numeri consigliati
         attendibility_score (float): Punteggio di attendibilità (0-100)
@@ -4451,86 +4558,87 @@ def mostra_numeri_forti_popup(numeri_finali, attendibility_score, origine_ml=Non
     """
     print("Programmazione popup con numeri forti...")  # DEBUG
     # Usa root.after per garantire l'esecuzione nel thread principale dell'UI
-    root.after(100, lambda: _mostra_numeri_forti_popup_interno(numeri_finali, attendibility_score, origine_ml))
+    # Passa una COPIA delle liste per evitare problemi con variabili modificate nel frattempo
+    root.after(100, lambda nf=list(numeri_finali), att=attendibility_score, orig=list(origine_ml) if origine_ml else None:
+               _mostra_numeri_forti_popup_interno(nf, att, orig))
 
 def _mostra_numeri_forti_popup_interno(numeri_finali, attendibility_score, origine_ml=None):
-    """Funzione interna che crea effettivamente il popup."""
+    """
+    Funzione interna che crea effettivamente il popup.
+    *** VERSIONE CORRETTA: Usa solo origine_ml per il colore ***
+    """
     try:
-        print("Creazione popup numeri forti...")  # DEBUG
-        print("numeri_finali:", numeri_finali)  # DEBUG
-        print("attendibility_score:", attendibility_score)  # DEBUG
+        print("Creazione popup numeri forti (interno)...")  # DEBUG
+        print("  numeri_finali:", numeri_finali)  # DEBUG
+        print("  attendibility_score:", attendibility_score)  # DEBUG
         if origine_ml:
-            print("origine_ml:", origine_ml)  # DEBUG
-        
+            print("  origine_ml:", origine_ml)  # DEBUG
+        else:
+            print("  origine_ml: None") # DEBUG se è None
+
         popup = tk.Toplevel(root)  # Usa 'root' come parent esplicito
         popup.title("Numeri Consigliati")
-        popup.geometry("400x250")
-        
+        popup.geometry("400x250") # Puoi aggiustare la dimensione se necessario
+
         # Titolo
         tk.Label(popup, text="Numeri Consigliati:", font=("Arial", 14, "bold")).pack(pady=10)
-        
+
         # Frame per i numeri
         frame_numeri = tk.Frame(popup)
         frame_numeri.pack(pady=10)
-        
-        # Mostra i numeri con colori differenti in base all'origine
+
+        # --- LOGICA COLORE CORRETTA ---
         for i, num in enumerate(numeri_finali):
-            # Determina il colore in base all'origine (se disponibile)
-            if origine_ml and i < len(origine_ml):
-                # Rosso per i numeri derivati dal machine learning
-                color = "red" if origine_ml[i] else "black"
-            else:
-                # Se origine_ml non è disponibile, usa la logica originale
-                if attendibility_score > 80:
-                    num_forti = 5
-                elif attendibility_score > 60:
-                    num_forti = 4
-                elif attendibility_score > 40:
-                    num_forti = 3
-                elif attendibility_score > 20:
-                    num_forti = 2
-                else:
-                    num_forti = 1
-                    
-                color = "red" if i < num_forti else "black"
-            
-            # Crea la label per il numero con il colore appropriato
+            color = "black"  # Colore di default (per Frequenti/Casuali o se origine_ml è mancante)
+
+            # Controlla se origine_ml è una lista valida e ha una voce per questo indice
+            if isinstance(origine_ml, list) and i < len(origine_ml):
+                if origine_ml[i] is True: # Se l'origine è ML (valore booleano True)
+                    color = "red"
+            elif origine_ml is not None:
+                 # Se origine_ml esiste ma non è una lista valida o è troppo corta
+                 print(f"WARN: origine_ml ({origine_ml}) non valido o corto per indice {i}. Uso colore default.")
+
+            # Crea la label per il numero con il colore determinato
             label = tk.Label(
-                frame_numeri, 
-                text=str(num), 
-                font=("Arial", 16, "bold"), 
-                fg=color, 
-                padx=10, 
-                pady=5, 
-                relief="solid", 
+                frame_numeri,
+                text=str(num),
+                font=("Arial", 16, "bold"),
+                fg=color,  # Usa il colore calcolato
+                padx=10,
+                pady=5,
+                relief="solid",
                 borderwidth=2
             )
-            label.pack(side=tk.LEFT)
-        
+            label.pack(side=tk.LEFT, padx=5) # Aggiunto padx per spaziare i numeri
+
         # Messaggi informativi
-        tk.Label(popup, text="Questi numeri sono leggermente più rilevanti.", font=("Arial", 12)).pack(pady=5)
-        tk.Label(popup, text=f"Attendibilità complessiva: {attendibility_score:.1f}/100", 
-                font=("Arial", 12)).pack(pady=5)
-        
+        # Puoi modificare questo testo se vuoi spiegare i colori
+        tk.Label(popup, text="Numeri in rosso: origine ML. Numeri in nero: frequenti/casuali.",
+                 font=("Arial", 10)).pack(pady=5)
+        tk.Label(popup, text=f"Attendibilità complessiva: {attendibility_score:.1f}/100",
+                 font=("Arial", 12)).pack(pady=5)
+
         # Pulsante di chiusura
-        btn_chiudi = tk.Button(popup, text="Chiudi", command=popup.destroy, 
-                            bg="#f0f0f0", width=10)
+        btn_chiudi = tk.Button(popup, text="Chiudi", command=popup.destroy,
+                               bg="#f0f0f0", width=10)
         btn_chiudi.pack(pady=10)
-        
+
         # Porta il popup in primo piano
         popup.lift()
         popup.attributes('-topmost', True)
         popup.after_idle(popup.attributes, '-topmost', False)
         popup.focus_force()
-        popup.grab_set()
-        
-        print("Popup creato con successo")  # DEBUG
-        
+        popup.grab_set() # Rende la finestra modale (opzionale)
+
+        print("Popup creato con successo (interno)")  # DEBUG
+
     except Exception as e:
         import traceback
-        error_msg = f"Errore nella creazione del popup: {e}\n{traceback.format_exc()}"
+        error_msg = f"Errore nella creazione del popup (interno): {e}\n{traceback.format_exc()}"
         print(error_msg)
-        messagebox.showerror("Errore", error_msg)
+        # Mostra l'errore all'utente se la creazione del popup fallisce
+        messagebox.showerror("Errore Popup", error_msg, parent=root) # Specifica parent per messagebox
 
 def mostra_grafico(all_hist_loss, all_hist_val_loss):
     """
@@ -5903,41 +6011,93 @@ def toggle_custom_loss():
     messagebox.showinfo("Info", f"Loss function personalizzata {status}.")
 
 def delete_models(ruota=None):
-    """Elimina i modelli salvati e il file JSON delle informazioni per una specifica ruota o per tutte le ruote se nessuna è specificata."""
+    """
+    Elimina i modelli salvati e il file JSON delle informazioni per una specifica
+    ruota o per tutte, considerando diverse convenzioni di nomi file.
+    """
+    logger = logging.getLogger(__name__) # Ottieni logger
+    # Lista dei possibili tipi di modello usati nei nomi dei file
+    # Aggiungi 'lstm' o altri se li usi e li salvi con quel suffisso
+    possible_model_types = ['dense', 'lstm']
+
     try:
-        # Se una ruota è specificata, elimina solo i modelli di quella ruota
         if ruota:
             ruote_to_delete = [ruota]
+            logger.info(f"Tentativo di cancellazione modelli per la ruota specifica: {ruota}")
         else:
-            # Altrimenti, elimina i modelli di tutte le ruote
-            ruote_to_delete = FILE_RUOTE.keys()
+            ruote_to_delete = list(FILE_RUOTE.keys()) # Assicurati sia una lista
+            logger.info(f"Tentativo di cancellazione modelli per tutte le ruote: {ruote_to_delete}")
 
-        for ruota in ruote_to_delete:
-            # Elimina i file dei pesi del modello
-            model_path = f'best_model_{ruota}.weights.h5'
-            if os.path.exists(model_path):
-                os.remove(model_path)
-                logger.info(f"Modello {model_path} cancellato.")
+        deleted_count = 0
+        for ruota_key in ruote_to_delete: # Usa ruota_key per evitare conflitto con parametro
+            logger.debug(f"Controllo file per ruota: {ruota_key}")
 
-            # Elimina anche il vecchio formato del file se esiste
-            alt_model_path = f'best_model_{ruota}.h5'
+            # 1. Cancella file modello con TIPO nel nome (salvato da avvia_elaborazione)
+            for m_type in possible_model_types:
+                model_path_typed = f'best_model_{ruota_key}_{m_type}.weights.h5'
+                if os.path.exists(model_path_typed):
+                    try:
+                        os.remove(model_path_typed)
+                        logger.info(f"Modello {model_path_typed} cancellato.")
+                        deleted_count += 1
+                    except OSError as e:
+                        logger.error(f"Errore durante la cancellazione di {model_path_typed}: {e}")
+
+            # 2. Cancella file modello SENZA tipo nel nome (salvato da analisi_avanzata_completa)
+            model_path_no_type = f'best_model_{ruota_key}.weights.h5'
+            if os.path.exists(model_path_no_type):
+                try:
+                    os.remove(model_path_no_type)
+                    logger.info(f"Modello {model_path_no_type} cancellato.")
+                    deleted_count += 1
+                except OSError as e:
+                     logger.error(f"Errore durante la cancellazione di {model_path_no_type}: {e}")
+
+            # 3. Cancella vecchio formato .h5 (senza tipo nel nome)
+            alt_model_path = f'best_model_{ruota_key}.h5'
             if os.path.exists(alt_model_path):
-                os.remove(alt_model_path)
-                logger.info(f"Modello {alt_model_path} cancellato.")
+                 try:
+                    os.remove(alt_model_path)
+                    logger.info(f"Modello (vecchio formato) {alt_model_path} cancellato.")
+                    deleted_count += 1
+                 except OSError as e:
+                    logger.error(f"Errore durante la cancellazione di {alt_model_path}: {e}")
 
-            # Elimina i file dei modelli relativi ai fold e alle epoche
-            for file_name in os.listdir('.'):
-                if file_name.startswith(f'model_{ruota}_fold') and file_name.endswith('.weights.h5'):
-                    os.remove(file_name)
-                    logger.info(f"Modello {file_name} cancellato.")
+            # 4. Cancella file dei fold (assumendo non abbiano tipo nel nome)
+            #    Se anche questi file includono il tipo, dovrai modificare anche questo loop.
+            try:
+                current_dir_files = os.listdir('.') # Cerca nella directory corrente
+                for file_name in current_dir_files:
+                    # Controlla il pattern dei file di fold
+                    if file_name.startswith(f'model_{ruota_key}_fold') and file_name.endswith('.weights.h5'):
+                        try:
+                            os.remove(file_name)
+                            logger.info(f"Modello Fold {file_name} cancellato.")
+                            deleted_count += 1
+                        except OSError as e:
+                             logger.error(f"Errore durante la cancellazione di {file_name}: {e}")
+            except FileNotFoundError:
+                 logger.warning(f"Directory corrente '.' non trovata durante ricerca file fold per {ruota_key}.")
+            except Exception as e_list:
+                 logger.error(f"Errore durante listdir per file fold ({ruota_key}): {e_list}")
 
-            # Elimina il file JSON delle informazioni del modello
-            info_file = f'model_info_{ruota}.json'
+            # 5. Cancella file JSON info
+            info_file = f'model_info_{ruota_key}.json'
             if os.path.exists(info_file):
-                os.remove(info_file)
-                logger.info(f"File delle informazioni del modello {info_file} cancellato.")
+                try:
+                    os.remove(info_file)
+                    logger.info(f"File informazioni {info_file} cancellato.")
+                    deleted_count += 1
+                except OSError as e:
+                     logger.error(f"Errore durante la cancellazione di {info_file}: {e}")
+
+        if deleted_count > 0:
+             logger.info(f"Cancellazione modelli completata. Totale file rimossi: {deleted_count}")
+        else:
+             logger.info("Nessun file modello/info corrispondente trovato da cancellare.")
+
     except Exception as e:
-        logger.error(f"Errore durante l'eliminazione dei modelli: {e}")
+        logger.error(f"Errore generale durante l'eliminazione dei modelli: {e}", exc_info=True)
 
 def on_closing():
     """Gestisce la chiusura dell'applicazione."""
@@ -6561,7 +6721,7 @@ def avvia_elaborazione():
                 numeri_frequenti = estrai_numeri_frequenti(ruota, start_date, end_date, n=20)
                 logger.info(f"Numeri frequenti considerati: {numeri_frequenti[:5]}...")
 
-                numeri_finali_suggeriti, origine_ml = genera_numeri_attendibili(
+                numeri_finali_suggeriti, origine_ml = genera_numeri_attendibili_modificata(
                     np.array(numeri_interi_predetti), # Passa come array numpy se la funzione lo richiede
                     attendibility_score,
                     numeri_frequenti

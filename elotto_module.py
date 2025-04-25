@@ -16,6 +16,10 @@ import requests
 import time      # Aggiunto per il timeout del join
 import queue     # Aggiunto per possibile miglioramento log (ma non usato nella soluzione principale)
 
+# NUOVO: Import per Feature Engineering e Cross-Validation
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
+
 try:
     from tkcalendar import DateEntry
     HAS_TKCALENDAR = True
@@ -24,6 +28,8 @@ except ImportError:
 
 DEFAULT_10ELOTTO_CHECK_COLPI = 1
 DEFAULT_10ELOTTO_DATA_URL = "https://raw.githubusercontent.com/illottodimax/Archivio/main/it-10elotto-past-draws-archive.txt"
+# NUOVO: Default per K-Fold Cross-Validation
+DEFAULT_CV_SPLITS = 5
 
 # --- Funzioni Globali (Seed, Log - INVARIATE) ---
 def set_seed(seed_value=42):
@@ -46,7 +52,7 @@ def _update_log_widget(log_widget, message):
     try:
         # Verifica se il widget esiste ancora prima di modificarlo
         if not log_widget.winfo_exists():
-             print(f"Log GUI widget destroyed, message lost: {message}")
+             # print(f"Log GUI widget destroyed, message lost: {message}") # Commentato per ridurre output console
              return
 
         current_state = log_widget.cget('state')
@@ -69,12 +75,12 @@ def _update_log_widget(log_widget, message):
         except:
             pass # Ignora errori durante il recupero dall'errore
 
-
-# --- Funzioni Specifiche 10eLotto (INVARIATE) ---
+# --- Funzioni Specifiche 10eLotto (carica_dati_10elotto INVARIATA) ---
 def carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callback=None):
     """
     Carica i dati del 10eLotto da un URL (RAW GitHub) o da un file locale.
     Gestisce la colonna vuota extra.
+    (Funzione invariata rispetto alla versione precedente)
     """
     lines = []
     is_url = data_source.startswith("http://") or data_source.startswith("https://")
@@ -198,8 +204,17 @@ def carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callba
             if numeri_array is not None and any(col.startswith('ExtraCol') for col in df_cleaned.columns):
                  extra_cols = [col for col in df_cleaned.columns if col.startswith('ExtraCol')]
                  if extra_cols:
-                      numeri_extra = df_cleaned[extra_cols[0]].values # Prendi la prima colonna extra
-                      if log_callback: log_callback(f"Estratta colonna Extra '{extra_cols[0]}'.")
+                      # Tenta di convertire in numerico, ignora errori per ora
+                      try:
+                          extra_vals = pd.to_numeric(df_cleaned[extra_cols[0]], errors='coerce')
+                          # Mantieni solo le righe dove extra è valido, se necessario
+                          # df_cleaned_extra = df_cleaned.dropna(subset=[extra_cols[0]])
+                          # numeri_extra = df_cleaned_extra[extra_cols[0]].values
+                          numeri_extra = extra_vals.values # Prendi tutti, potrebbero esserci NaN
+                          if log_callback: log_callback(f"Estratta colonna Extra '{extra_cols[0]}'.")
+                      except Exception as e_ex:
+                          log_callback(f"ATTENZIONE: Errore conversione colonna Extra '{extra_cols[0]}': {e_ex}")
+                          numeri_extra = None
                  else:
                       numeri_extra = None
 
@@ -213,42 +228,127 @@ def carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callba
         if log_callback: log_callback(f"Errore grave carica_dati_10elotto V2: {e}\n{traceback.format_exc()}");
         return None, None, None, None
 
-# --- Funzioni prepara_sequenze, build_model, LogCallback, genera_previsione (INVARIATE) ---
-def prepara_sequenze_per_modello(numeri_array, sequence_length=5, log_callback=None):
-    if numeri_array is None or len(numeri_array) == 0:
-        if log_callback: log_callback("ERRORE (prep_seq): No input array.")
+
+# NUOVO: Funzione per Feature Engineering
+def engineer_features(numeri_array, log_callback=None):
+    """
+    Crea features aggiuntive dall'array dei numeri estratti.
+    Input: numeri_array (N_draws, 20)
+    Output: combined_features (N_draws, 20 + N_new_features)
+    """
+    if numeri_array is None or numeri_array.ndim != 2 or numeri_array.shape[1] != 20:
+        if log_callback: log_callback("ERRORE (engineer_features): Input numeri_array non valido.")
+        return None
+
+    if log_callback: log_callback(f"Inizio Feature Engineering su {numeri_array.shape[0]} estrazioni...")
+
+    try:
+        # Features base per riga
+        draw_sum = np.sum(numeri_array, axis=1, keepdims=True)
+        draw_mean = np.mean(numeri_array, axis=1, keepdims=True)
+        odd_count = np.sum(numeri_array % 2 != 0, axis=1, keepdims=True)
+        even_count = 20 - odd_count # Calcolato da odd_count
+        low_count = np.sum((numeri_array >= 1) & (numeri_array <= 45), axis=1, keepdims=True)
+        high_count = 20 - low_count # Calcolato da low_count
+
+        # Combina le nuove features
+        engineered_features = np.concatenate([
+            draw_sum,
+            draw_mean,
+            odd_count,
+            even_count,
+            low_count,
+            high_count
+        ], axis=1)
+
+        # Combina le features ingegnerizzate con i numeri originali
+        combined_features = np.concatenate([numeri_array, engineered_features], axis=1)
+
+        if log_callback: log_callback(f"Feature Engineering completato. Shape finale features: {combined_features.shape}")
+        return combined_features
+
+    except Exception as e:
+        if log_callback: log_callback(f"ERRORE durante Feature Engineering: {e}\n{traceback.format_exc()}")
+        return None
+
+# MODIFICATO: Funzione prepara_sequenze per gestire le nuove features
+def prepara_sequenze_per_modello(input_feature_array, target_number_array, sequence_length=5, log_callback=None):
+    """
+    Prepara le sequenze per il modello LSTM/Dense.
+    Input:
+        input_feature_array: Array con le features (numeri + engineered), shape (N_draws, N_features)
+        target_number_array: Array originale dei numeri estratti (usato per il target), shape (N_draws, 20)
+        sequence_length: Lunghezza della sequenza di input.
+    Output:
+        X: Array delle sequenze di input, shape (N_sequences, sequence_length * N_features)
+        y: Array target (one-hot encoded), shape (N_sequences, 90)
+    """
+    if input_feature_array is None or target_number_array is None:
+        if log_callback: log_callback("ERRORE (prep_seq): Input array (features o target) mancante.")
         return None, None
-    if numeri_array.ndim != 2 or numeri_array.shape[1] != 20:
-        if log_callback: log_callback(f"ERRORE (prep_seq): Array numeri non ha 20 colonne (shape: {numeri_array.shape}).")
+    if input_feature_array.ndim != 2 or target_number_array.ndim != 2:
+        if log_callback: log_callback("ERRORE (prep_seq): Input arrays devono avere 2 dimensioni.")
         return None, None
-    X, y = [], []; num_estrazioni = len(numeri_array)
-    if log_callback: log_callback(f"Preparazione sequenze 10eLotto: seq={sequence_length}, estrazioni={num_estrazioni}.")
+    if input_feature_array.shape[0] != target_number_array.shape[0]:
+        if log_callback: log_callback("ERRORE (prep_seq): Disallineamento righe tra feature array e target array.")
+        return None, None
+    if target_number_array.shape[1] != 20:
+         if log_callback: log_callback(f"ERRORE (prep_seq): Target number array non ha 20 colonne (shape: {target_number_array.shape}).")
+         return None, None
+
+    n_features = input_feature_array.shape[1]
+    if log_callback: log_callback(f"Preparazione sequenze: seq_len={sequence_length}, num_features={n_features}")
+
+    X, y = [], []
+    num_estrazioni = len(input_feature_array)
+
     if num_estrazioni <= sequence_length:
         if log_callback: log_callback(f"ERRORE: Estrazioni ({num_estrazioni}) <= seq ({sequence_length}). Necessarie {sequence_length + 1}.")
         return None, None
+
     valid_seq, invalid_tgt = 0, 0
     for i in range(num_estrazioni - sequence_length):
-        in_seq = numeri_array[i:i+sequence_length]
-        tgt_extr = numeri_array[i+sequence_length]
+        # Sequenza di input dalle features combinate
+        in_seq = input_feature_array[i : i + sequence_length]
+
+        # Target dalla *successiva* estrazione dell'array *originale*
+        tgt_extr = target_number_array[i + sequence_length]
+
+        # Validazione target (1-90)
         mask = (tgt_extr >= 1) & (tgt_extr <= 90)
         if np.all(mask):
-             target = np.zeros(90, dtype=int); target[tgt_extr - 1] = 1
-             X.append(in_seq.flatten()); y.append(target); valid_seq += 1
+            # Crea target one-hot
+            target = np.zeros(90, dtype=int)
+            target[tgt_extr - 1] = 1 # Indici 0-89 per numeri 1-90
+
+            # Appiattisci la sequenza di input e aggiungi
+            X.append(in_seq.flatten())
+            y.append(target)
+            valid_seq += 1
         else:
-             invalid_tgt += 1
-             if invalid_tgt < 5 and log_callback: log_callback(f"ATT: Scartata seq indice {i} (target non valido: {tgt_extr[~mask]})")
+            invalid_tgt += 1
+            if invalid_tgt < 5 and log_callback: log_callback(f"ATT: Scartata seq indice {i} (target non valido: {tgt_extr[~mask]})")
+
     if invalid_tgt > 0 and log_callback: log_callback(f"Scartate {invalid_tgt} sequenze totali (target non valido).")
     if not X:
         if log_callback: log_callback("ERRORE: Nessuna sequenza valida creata."); return None, None
-    if log_callback: log_callback(f"Create {valid_seq} sequenze 10eLotto valide.")
+
+    if log_callback: log_callback(f"Create {valid_seq} sequenze valide.")
     try:
-        X_np = np.array(X); y_np = np.array(y)
+        X_np = np.array(X)
+        y_np = np.array(y)
         if log_callback: log_callback(f"Shape finale: X={X_np.shape}, y={y_np.shape}")
         return X_np, y_np
     except Exception as e:
-        if log_callback: log_callback(f"ERRORE conversione NumPy: {e}"); return None, None
+        if log_callback: log_callback(f"ERRORE conversione NumPy in prep_seq: {e}"); return None, None
+
+
+# --- build_model_10elotto, LogCallback, genera_previsione_10elotto (INVARIATE NELLA LORO LOGICA INTERNA) ---
+# Nota: build_model_10elotto riceverà un input_shape diverso, ma la sua struttura non cambia.
+# Nota: genera_previsione_10elotto riceverà un X_input con più features, ma la sua logica non cambia.
 
 def build_model_10elotto(input_shape, hidden_layers=[512, 256, 128], loss_function='binary_crossentropy', optimizer='adam', dropout_rate=0.3, l1_reg=0.0, l2_reg=0.0, log_callback=None):
+    """Costruisce il modello Keras. (Logica interna invariata)"""
     if not isinstance(input_shape, tuple) or len(input_shape) != 1 or not isinstance(input_shape[0], int) or input_shape[0] <= 0:
         if log_callback: log_callback(f"ERRORE build_model: input_shape '{input_shape}' non valido. Deve essere tipo (num_features,)."); return None
     if log_callback: log_callback(f"Costruzione modello 10eLotto: Input={input_shape}, L={hidden_layers}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate}, L1={l1_reg}, L2={l2_reg}")
@@ -274,6 +374,7 @@ def build_model_10elotto(input_shape, hidden_layers=[512, 256, 128], loss_functi
     return model
 
 class LogCallback(tf.keras.callbacks.Callback):
+    """Callback Keras per loggare l'output nella GUI. (Invariata)"""
     def __init__(self, log_callback_func, stop_event=None): # Aggiunto stop_event opzionale
          super().__init__()
          self.log_callback_func = log_callback_func
@@ -296,20 +397,24 @@ class LogCallback(tf.keras.callbacks.Callback):
     #         self.model.stop_training = True
 
 def genera_previsione_10elotto(model, X_input, num_predictions=10, log_callback=None):
+    """Genera la previsione usando il modello addestrato. (Logica interna invariata)"""
     if log_callback: log_callback(f"Generazione previsione 10eLotto per {num_predictions} numeri...")
     if model is None: log_callback("ERR (genera_prev_10eLotto): Modello non valido."); return None
     if X_input is None or X_input.size == 0: log_callback("ERR (genera_prev_10eLotto): Input vuoto."); return None
     if not (1 <= num_predictions <= 90): log_callback(f"ERR (genera_prev_10eLotto): num_predictions={num_predictions} non valido (1-90)."); return None
     try:
         input_reshaped = None
-        if X_input.ndim == 1: input_reshaped = X_input.reshape(1, -1)
-        elif X_input.ndim == 2 and X_input.shape[0] == 1: input_reshaped = X_input
+        # L'input X_input dovrebbe già essere (1, N_features_flattened) dopo scaling e flatten
+        if X_input.ndim == 2 and X_input.shape[0] == 1:
+             input_reshaped = X_input
+        # Gestiamo anche il caso in cui arrivi un array 1D per errore
+        elif X_input.ndim == 1:
+             input_reshaped = X_input.reshape(1, -1)
+             if log_callback: log_callback(f"ATT: Ricevuto input 1D shape {X_input.shape}, reshaped a {input_reshaped.shape}.")
         else:
-            if X_input.ndim >= 2 and X_input.shape[0] > 0:
-                input_reshaped = X_input[0].reshape(1, -1)
-                if log_callback: log_callback(f"ATT: Ricevuto input 10eLotto shape {X_input.shape}, usata prima riga.")
-            else:
-                if log_callback: log_callback(f"ERRORE: Shape input 10eLotto non gestita: {X_input.shape}"); return None
+            if log_callback: log_callback(f"ERRORE: Shape input 10eLotto non gestita per predict: {X_input.shape}. Atteso (1, N_features_flat)."); return None
+
+        # Verifica shape input vs modello (opzionale ma utile)
         try:
             if hasattr(model, 'input_shape') and model.input_shape is not None: expected_input_features = model.input_shape[-1]
             elif hasattr(model, 'layers') and model.layers and hasattr(model.layers[0], 'input_shape'): expected_input_features = model.layers[0].input_shape[-1]
@@ -318,38 +423,46 @@ def genera_previsione_10elotto(model, X_input, num_predictions=10, log_callback=
                 log_callback(f"ERRORE Shape Input 10eLotto: Input({input_reshaped.shape[1]}) != Modello({expected_input_features})."); return None
         except Exception as e_shape:
             if log_callback: log_callback(f"ATT: Eccezione verifica input_shape modello 10eLotto: {e_shape}")
+
+        # Previsione
         pred_probabilities = model.predict(input_reshaped, verbose=0)
         if pred_probabilities is None or pred_probabilities.size == 0: log_callback("ERR: predict() ha restituito vuoto."); return None
         if pred_probabilities.ndim != 2 or pred_probabilities.shape[0] != 1 or pred_probabilities.shape[1] != 90:
              log_callback(f"ERRORE: Output shape da predict inatteso: {pred_probabilities.shape}. Atteso (1, 90)."); return None
+
+        # Estrai numeri migliori
         probs_vector = pred_probabilities[0]
-        sorted_indices = np.argsort(probs_vector); top_indices_ascending_prob = sorted_indices[-num_predictions:]
-        top_indices_descending_prob = top_indices_ascending_prob[::-1]; predicted_numbers_by_prob = [int(index + 1) for index in top_indices_descending_prob]
+        sorted_indices = np.argsort(probs_vector); # Indici ordinati per probabilità crescente
+        top_indices_ascending_prob = sorted_indices[-num_predictions:] # Prendi gli ultimi N (prob più alta)
+        top_indices_descending_prob = top_indices_ascending_prob[::-1]; # Inverti per avere probabilità decrescente
+        predicted_numbers_by_prob = [int(index + 1) for index in top_indices_descending_prob] # +1 per passare da indice 0-89 a numero 1-90
+
         if log_callback: log_callback(f"Numeri 10eLotto predetti ({len(predicted_numbers_by_prob)} ord. per probabilità decr.): {predicted_numbers_by_prob}")
         return predicted_numbers_by_prob
     except Exception as e:
         if log_callback: log_callback(f"ERRORE CRITICO generazione previsione 10eLotto: {e}\n{traceback.format_exc()}"); return None
 
-# --- Funzione Analisi Principale (INVARIATA) ---
+# --- Funzione Analisi Principale (MODIFICATA per Feature Engineering e Cross-Validation) ---
 def analisi_10elotto(file_path, start_date, end_date, sequence_length=5,
                      loss_function='binary_crossentropy', optimizer='adam',
                      dropout_rate=0.3, l1_reg=0.0, l2_reg=0.0,
                      hidden_layers_config=[512, 256, 128],
                      max_epochs=100, batch_size=32, patience=15, min_delta=0.0001,
                      num_predictions=10,
+                     n_cv_splits=DEFAULT_CV_SPLITS, # NUOVO: Numero di fold per CV
                      log_callback=None,
-                     stop_event=None): # Aggiunto stop_event opzionale
+                     stop_event=None):
     """
-    Analizza i dati del 10 e Lotto (da URL o file) e genera previsioni.
-    Aggiunto controllo stop_event.
+    Analizza i dati del 10 e Lotto, applica feature engineering,
+    usa TimeSeriesSplit cross-validation, addestra un modello finale e genera previsioni.
     """
     if log_callback:
         source_type = "URL" if file_path.startswith("http") else "File Locale"
         source_name = os.path.basename(file_path) if source_type == "File Locale" else file_path
-        log_callback(f"=== Avvio Analisi 10eLotto Dettagliata ===")
+        log_callback(f"=== Avvio Analisi 10eLotto Dettagliata (con FE & CV) ===")
         log_callback(f"Sorgente: {source_type} ({source_name}), Date: {start_date}-{end_date}, SeqIn: {sequence_length}, NumOut: {num_predictions}")
         log_callback(f"Modello: L={hidden_layers_config}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate}, L1={l1_reg}, L2={l2_reg}")
-        log_callback(f"Training: Epochs={max_epochs}, Batch={batch_size}, Pat={patience}, MinDelta={min_delta}")
+        log_callback(f"Training: Epochs={max_epochs}, Batch={batch_size}, CV Splits={n_cv_splits}, Pat={patience}, MinDelta={min_delta}")
         log_callback(f"---------------------------------")
 
     # Controllo stop prima di iniziare
@@ -366,111 +479,210 @@ def analisi_10elotto(file_path, start_date, end_date, sequence_length=5,
     # Controllo stop dopo caricamento
     if stop_event and stop_event.is_set(): log_callback("Analisi annullata dopo caricamento dati."); return None, "Analisi annullata"
 
-    # 2. Prepara sequenze
+    # NUOVO: 2. Feature Engineering
+    combined_features = engineer_features(numeri_array, log_callback=log_callback)
+    if combined_features is None:
+        return None, "Feature Engineering fallito."
+
+    # Controllo stop dopo FE
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata dopo Feature Engineering."); return None, "Analisi annullata"
+
+    # NUOVO: 3. Scaling delle Features Combinate (prima di creare le sequenze)
+    scaler = StandardScaler()
+    try:
+        # Adatta lo scaler a tutte le features combinate disponibili
+        combined_features_scaled = scaler.fit_transform(combined_features)
+        log_callback(f"Features combinate scalate con StandardScaler. Shape: {combined_features_scaled.shape}")
+    except Exception as e_scale:
+        log_callback(f"ERRORE scaling features combinate: {e_scale}"); return None, "Errore scaling dati input"
+
+    # MODIFICATO: 4. Prepara sequenze usando le features scalate e i numeri target originali
     X, y = None, None
     try:
-        X, y = prepara_sequenze_per_modello(numeri_array, sequence_length, log_callback=log_callback)
+        # Passa le features scalate per l'input (X) e l'array originale per il target (y)
+        X, y = prepara_sequenze_per_modello(combined_features_scaled, numeri_array, sequence_length, log_callback=log_callback)
         if X is None or y is None or len(X) == 0: return None, "Creazione sequenze fallita o nessuna sequenza valida."
-        min_samples_for_split = 5; min_samples_for_train = 2
-        if len(X) < min_samples_for_train: msg = f"ERRORE: Troppi pochi campioni ({len(X)} < {min_samples_for_train}) per addestrare il modello 10eLotto."; log_callback(msg); return None, msg
-        elif len(X) < min_samples_for_split: log_callback(f"ATTENZIONE: Solo {len(X)} campioni disponibili (< {min_samples_for_split}). Training su tutti i dati senza validation.")
-    except Exception as e: log_callback(f"Errore preparazione sequenze 10eLotto: {e}\n{traceback.format_exc()}"); return None, f"Errore prep sequenze: {e}"
+
+        # Verifica minima per CV
+        min_samples_for_cv = n_cv_splits + 1
+        if len(X) < min_samples_for_cv:
+            msg = f"ERRORE: Troppi pochi campioni ({len(X)}) per {n_cv_splits}-Fold CV. Servono almeno {min_samples_for_cv}. Riduci il numero di split o aumenta i dati."; log_callback(msg); return None, msg
+
+    except Exception as e:
+        log_callback(f"Errore preparazione sequenze: {e}\n{traceback.format_exc()}"); return None, f"Errore prep sequenze: {e}"
 
     # Controllo stop dopo preparazione sequenze
     if stop_event and stop_event.is_set(): log_callback("Analisi annullata dopo preparazione sequenze."); return None, "Analisi annullata"
 
-    # 3. Normalizza Input
-    try: X_scaled = X.astype(np.float32) / 90.0; log_callback(f"Input X normalizzato (diviso per 90). Shape: {X_scaled.shape}")
-    except Exception as e_scale: log_callback(f"ERRORE normalizzazione input X 10eLotto: {e_scale}"); return None, "Errore normalizzazione dati input"
+    # MODIFICATO: 5. Cross-Validation con TimeSeriesSplit
+    tscv = TimeSeriesSplit(n_splits=n_cv_splits)
+    fold_val_losses = []
+    fold_val_accuracies = [] # Aggiungiamo anche l'accuracy
+    fold_best_epochs = []
 
-    # 4. Split train/validation
-    X_train, X_val, y_train, y_val = None, None, None, None; split_ratio = 0.8
-    if len(X_scaled) >= min_samples_for_split:
+    log_callback(f"\n--- Inizio {n_cv_splits}-Fold TimeSeries Cross-Validation ---")
+
+    for fold, (train_index, val_index) in enumerate(tscv.split(X)):
+        if stop_event and stop_event.is_set(): log_callback(f"Cross-Validation interrotta prima del fold {fold+1}."); break # Esce dal loop CV
+
+        log_callback(f"\n--- Fold {fold+1}/{n_cv_splits} ---")
+        X_train, X_val = X[train_index], X[val_index]
+        y_train, y_val = y[train_index], y[val_index]
+        log_callback(f"Train: {len(X_train)} campioni (indici {train_index[0]}-{train_index[-1]}), Validation: {len(X_val)} campioni (indici {val_index[0]}-{val_index[-1]})")
+
+        if len(X_train) == 0 or len(X_val) == 0:
+             log_callback(f"ATTENZIONE: Fold {fold+1} saltato (train o validation set vuoto).")
+             continue
+
+        # Costruisci e addestra il modello per questo fold
+        model_fold, history_fold, tf_log_callback_obj_fold = None, None, None
         try:
-            split_idx = max(1, min(int(split_ratio * len(X_scaled)), len(X_scaled) - 1))
-            X_train, X_val = X_scaled[:split_idx], X_scaled[split_idx:]
-            y_train, y_val = y[:split_idx], y[split_idx:]
-            if len(X_train) == 0 or len(X_val) == 0 or len(y_train) == 0 or len(y_val) == 0:
-                 log_callback(f"ERRORE: Split train/val fallito (set vuoti). Fallback a training su tutti i dati.")
-                 X_train, y_train = X_scaled, y; X_val, y_val = None, None
-            elif log_callback: log_callback(f"Dati divisi: {len(X_train)} train, {len(X_val)} validation.")
-        except Exception as e_split: log_callback(f"ERRORE split train/validation 10eLotto: {e_split}. Fallback a training su tutti i dati."); X_train, y_train = X_scaled, y; X_val, y_val = None, None
-    else: log_callback(f"INFO: Training 10eLotto su tutti i dati (campioni < {min_samples_for_split}). Nessun set di validazione."); X_train, y_train = X_scaled, y; X_val, y_val = None, None
+            tf.keras.backend.clear_session() # Pulisci sessione per nuovo modello
+            input_shape_fold = (X_train.shape[1],)
+            model_fold = build_model_10elotto(input_shape_fold, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
+            if model_fold is None:
+                log_callback(f"ERRORE: Costruzione modello fallita per fold {fold+1}. Salto fold.")
+                continue
 
-    # Controllo stop prima del training
-    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima del training."); return None, "Analisi annullata"
+            monitor = 'val_loss' # Monitoriamo sempre val_loss nei fold
+            early_stopping_fold = tf.keras.callbacks.EarlyStopping(monitor=monitor, patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=0) # Verbose 0 nel loop
+            tf_log_callback_obj_fold = LogCallback(log_callback, stop_event)
 
-    # 5. Costruisci e addestra il modello
-    model, history, tf_log_callback_obj = None, None, None
-    final_val_loss, final_train_loss_at_best = float('inf'), float('inf')
+            log_callback(f"Inizio addestramento fold {fold+1}...")
+            history_fold = model_fold.fit(X_train, y_train, validation_data=(X_val, y_val),
+                                          epochs=max_epochs, batch_size=batch_size,
+                                          callbacks=[early_stopping_fold, tf_log_callback_obj_fold],
+                                          verbose=0)
+
+            # Controllo stop subito dopo il fit del fold
+            if stop_event and stop_event.is_set(): log_callback(f"Training fold {fold+1} interrotto."); break # Esce dal loop CV
+
+            if history_fold and history_fold.history and 'val_loss' in history_fold.history:
+                best_epoch_idx = np.argmin(history_fold.history['val_loss'])
+                best_val_loss = history_fold.history['val_loss'][best_epoch_idx]
+                best_val_acc = history_fold.history['val_accuracy'][best_epoch_idx] if 'val_accuracy' in history_fold.history else -1.0
+
+                fold_val_losses.append(best_val_loss)
+                fold_val_accuracies.append(best_val_acc)
+                fold_best_epochs.append(best_epoch_idx + 1) # Epoche partono da 1
+
+                log_callback(f"Fold {fold+1} completato. Miglior epoca: {best_epoch_idx+1}, Val Loss: {best_val_loss:.4f}, Val Acc: {best_val_acc:.4f}")
+            else:
+                log_callback(f"ATTENZIONE: History non valida o 'val_loss' mancante per fold {fold+1}. Salto fold.")
+
+        except tf.errors.ResourceExhaustedError as e_mem:
+             msg = f"ERRORE Memoria fold {fold+1}: {e_mem}. Riduci batch size/modello."; log_callback(msg); log_callback(traceback.format_exc()); break # Interrompi CV per errore memoria
+        except Exception as e_fold:
+            # Verifica se l'eccezione è dovuta a stop richiesto
+            if stop_event and stop_event.is_set(): log_callback(f"Eccezione fold {fold+1} probabilmente dovuta a stop: {e_fold}"); break # Interrompi CV
+            msg = f"ERRORE CRITICO addestramento fold {fold+1}: {e_fold}"; log_callback(msg); log_callback(traceback.format_exc());
+            # Potresti decidere di continuare con gli altri fold o interrompere
+            # break # Interrompi CV in caso di errore grave
+            log_callback("Continuo con il prossimo fold nonostante l'errore...")
+            continue # Prova ad andare al prossimo fold
+
+    # Fine loop Cross-Validation
+    if stop_event and stop_event.is_set(): log_callback("Cross-Validation interrotta."); return None, "Analisi Interrotta (CV)"
+
+    # Calcola e logga risultati medi CV (se ci sono stati fold completati)
+    avg_val_loss, avg_val_acc, avg_epochs = -1.0, -1.0, -1.0
+    attendibilita_cv_msg = "Attendibilità CV: Non Determinata (CV incompleta o fallita)"
+    if fold_val_losses:
+        avg_val_loss = np.mean(fold_val_losses)
+        avg_val_acc = np.mean(fold_val_accuracies) if fold_val_accuracies else -1.0
+        avg_epochs = np.mean(fold_best_epochs) if fold_best_epochs else -1.0
+        log_callback("\n--- Risultati Cross-Validation ---")
+        log_callback(f"Loss media (val): {avg_val_loss:.4f}")
+        if avg_val_acc >= 0: log_callback(f"Accuracy media (val): {avg_val_acc:.4f}")
+        if avg_epochs >= 0: log_callback(f"Epoca media ottimale: {avg_epochs:.1f}")
+        attendibilita_cv_msg = f"Attendibilità CV: Loss={avg_val_loss:.4f}, Acc={avg_val_acc:.4f} ({len(fold_val_losses)} folds)"
+        log_callback("---------------------------------")
+    else:
+        log_callback("\nATTENZIONE: Nessun fold di cross-validation completato con successo.")
+        return None, "Cross-Validation fallita (nessun fold valido)"
+
+    # Controllo stop prima del training finale
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima del training finale."); return None, "Analisi Interrotta (Pre-Final Train)"
+
+    # MODIFICATO: 6. Addestra il modello finale su TUTTI i dati (X, y)
+    # Usiamo i parametri originali ma senza EarlyStopping su validation set,
+    # addestriamo per un numero fisso di epoche (es. max_epochs o media epoche da CV).
+    # Scelta: Usiamo max_epochs come limite superiore, ma includiamo EarlyStopping
+    # monitorando 'loss' (loss di training) per evitare overfitting eccessivo.
+    final_model = None
+    log_callback("\n--- Addestramento Modello Finale su tutti i dati ---")
     try:
         tf.keras.backend.clear_session()
-        if X_train is None or X_train.size == 0 or X_train.ndim != 2 or X_train.shape[1] == 0: log_callback(f"ERRORE CRITICO: Dati training 10eLotto (X_train) non validi. Shape: {X_train.shape if X_train is not None else 'None'}"); return None, "Errore dati training"
-        input_shape = (X_train.shape[1],)
-        model = build_model_10elotto(input_shape, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
-        if model is None: return None, "Costruzione modello 10eLotto fallita"
-        has_validation_data = (X_val is not None and X_val.size > 0 and y_val is not None and y_val.size > 0)
-        monitor = 'val_loss' if has_validation_data else 'loss'
-        log_callback(f"Monitoraggio EarlyStopping 10eLotto: '{monitor}'")
-        early_stopping = tf.keras.callbacks.EarlyStopping(monitor=monitor, patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=1)
-        tf_log_callback_obj = LogCallback(log_callback, stop_event) # Passa stop_event a LogCallback
-        validation_data_fit = (X_val, y_val) if has_validation_data else None
-        log_callback(f"Inizio addestramento modello 10eLotto...")
-        history = model.fit(X_train, y_train, validation_data=validation_data_fit, epochs=max_epochs, batch_size=batch_size, callbacks=[early_stopping, tf_log_callback_obj], verbose=0)
-        # Controllo stop subito dopo il fit (se è stato interrotto dal callback)
-        if stop_event and stop_event.is_set(): log_callback("Training interrotto durante l'esecuzione."); return None, "Training interrotto"
-        if history and history.history:
-            epochs = len(history.history.get('loss', [])); train_loss_hist = history.history.get('loss', []); val_loss_hist = history.history.get('val_loss', [])
-            log_callback(f"Addestramento 10eLotto terminato: {epochs} epoche.")
-            best_idx = -1
-            if val_loss_hist: best_idx = np.argmin(val_loss_hist); final_val_loss = val_loss_hist[best_idx]; final_train_loss_at_best = train_loss_hist[best_idx] if best_idx < len(train_loss_hist) else float('inf')
-            elif train_loss_hist: best_idx = np.argmin(train_loss_hist); final_train_loss_at_best = train_loss_hist[best_idx]; final_val_loss = float('inf')
-            if best_idx != -1 and log_callback: log_callback(f"Miglior epoca 10eLotto: {best_idx+1}, Val Loss: {final_val_loss:.4f}, Train Loss (epoca): {final_train_loss_at_best:.4f}")
-        else: log_callback("ATTENZIONE: Addestramento 10eLotto senza history valida (potrebbe essere stato interrotto).")
+        input_shape_final = (X.shape[1],)
+        final_model = build_model_10elotto(input_shape_final, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
+        if final_model is None: return None, "Costruzione modello finale fallita"
+
+        # Usiamo EarlyStopping sulla loss di training per il modello finale
+        # Questo è un compromesso: evita di girare per tutte le max_epochs se la loss smette
+        # di migliorare significativamente, anche se non c'è un vero val set qui.
+        final_early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=1) # Monitor 'loss'
+        final_log_callback = LogCallback(log_callback, stop_event)
+
+        log_callback(f"Inizio addestramento finale (max {max_epochs} epoche, ES su 'loss')...")
+        history_final = final_model.fit(X, y,
+                                        epochs=max_epochs,
+                                        batch_size=batch_size,
+                                        callbacks=[final_early_stopping, final_log_callback],
+                                        verbose=0) # validation_data non specificato
+
+        # Controllo stop subito dopo il fit finale
+        if stop_event and stop_event.is_set(): log_callback("Addestramento finale interrotto."); return None, "Analisi Interrotta (Final Train)"
+
+        final_epochs = len(history_final.history.get('loss', []))
+        final_loss = history_final.history.get('loss', [float('inf')])[-1]
+        final_acc = history_final.history.get('accuracy', [-1.0])[-1]
+        log_callback(f"Addestramento finale completato: {final_epochs} epoche, Loss: {final_loss:.4f}, Acc: {final_acc:.4f}")
+
     except tf.errors.ResourceExhaustedError as e_mem:
-         msg = f"ERRORE Memoria 10eLotto: {e_mem}. Riduci batch size/modello."; log_callback(msg); log_callback(traceback.format_exc()); return None, msg
-    except Exception as e:
-        # Verifica se l'eccezione è dovuta a un'interruzione richiesta
-        if stop_event and stop_event.is_set(): log_callback(f"Eccezione durante training probabilmente dovuta a stop richiesto: {e}"); return None, "Training interrotto"
-        msg = f"ERRORE CRITICO addestramento 10eLotto: {e}"; log_callback(msg); log_callback(traceback.format_exc()); return None, msg
-    finally:
-        # Assicurati che il callback di logging venga fermato se necessario
-        # if tf_log_callback_obj: tf_log_callback_obj.stop_logging() # Non più necessario se si usa stop_event
-        pass
+         msg = f"ERRORE Memoria Addestramento Finale: {e_mem}."; log_callback(msg); log_callback(traceback.format_exc()); return None, msg
+    except Exception as e_final:
+        if stop_event and stop_event.is_set(): log_callback(f"Eccezione training finale probabilmente dovuta a stop: {e_final}"); return None, "Analisi Interrotta (Final Train Error)"
+        msg = f"ERRORE CRITICO addestramento finale: {e_final}"; log_callback(msg); log_callback(traceback.format_exc()); return None, msg
 
     # Controllo stop prima della previsione
-    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima della previsione finale."); return None, "Analisi annullata"
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima della previsione finale."); return None, "Analisi Interrotta (Pre-Predict)"
 
-    # 6. Prepara input e genera previsione
-    numeri_predetti, attendibilita_msg = None, "Attendibilità Non Determinata"
+    # MODIFICATO: 7. Prepara input e genera previsione con il modello finale
+    numeri_predetti = None
     try:
-        log_callback("Preparazione input previsione finale 10eLotto...")
-        if numeri_array is None or len(numeri_array) < sequence_length: log_callback("ERRORE: Dati originali insuff. per input previsione 10eLotto."); return None, "Dati insuff per input previsione"
-        input_pred_raw = numeri_array[-sequence_length:]
-        input_pred_scaled = input_pred_raw.flatten().astype(np.float32) / 90.0
-        numeri_predetti = genera_previsione_10elotto(model, input_pred_scaled, num_predictions, log_callback=log_callback)
-        if numeri_predetti is None: return None, "Generazione previsione 10eLotto fallita."
-        ratio = float('inf')
-        if final_train_loss_at_best > 1e-7 and final_val_loss != float('inf'): ratio = final_val_loss / final_train_loss_at_best
-        if ratio < 1.2: attend = "Alta"
-        elif ratio < 1.8: attend = "Media"
-        elif final_val_loss != float('inf'): attend = "Bassa (overfitting?)"
-        elif final_train_loss_at_best != float('inf'): attend = "Non Valutabile (solo training)"
-        else: attend = "Non Determinabile"
-        attendibilita_msg = f"Attendibilità: {attend}" + (f" (Ratio V/T: {ratio:.2f})" if ratio != float('inf') else "")
-        log_callback(attendibilita_msg)
-        return numeri_predetti, attendibilita_msg
-    except Exception as e:
-         log_callback(f"Errore CRITICO previsione finale 10eLotto: {e}\n{traceback.format_exc()}"); return None, f"Errore previsione finale: {e}"
+        log_callback("\nPreparazione input per previsione finale...")
+        # Prendi le ultime 'sequence_length' righe dalle features COMBINATE e SCALATE
+        if len(combined_features_scaled) < sequence_length:
+             log_callback("ERRORE: Dati scalati insufficienti per input previsione."); return None, "Dati insuff per input previsione"
+
+        input_pred_seq_scaled = combined_features_scaled[-sequence_length:]
+        # Appiattisci la sequenza
+        input_pred_flat_scaled = input_pred_seq_scaled.flatten()
+        # Reshape per il modello (1 campione, N features appiattite)
+        input_pred_ready = input_pred_flat_scaled.reshape(1, -1)
+
+        log_callback(f"Input previsione pronto (shape: {input_pred_ready.shape}). Generazione...")
+        numeri_predetti = genera_previsione_10elotto(final_model, input_pred_ready, num_predictions, log_callback=log_callback)
+
+        if numeri_predetti is None: return None, "Generazione previsione finale fallita."
+
+        # Combina l'attendibilità CV con quella del training finale
+        final_attendibilita_msg = f"{attendibilita_cv_msg}. Training finale: Loss={final_loss:.4f}, Acc={final_acc:.4f}"
+        log_callback(f"\nAttendibilità combinata: {final_attendibilita_msg}")
+
+        return numeri_predetti, final_attendibilita_msg
+
+    except Exception as e_pred:
+         log_callback(f"Errore CRITICO previsione finale: {e_pred}\n{traceback.format_exc()}"); return None, f"Errore previsione finale: {e_pred}"
 # --- Fine Funzione analisi_10elotto ---
 
 
-# --- Definizione Classe App10eLotto (MODIFICATA per Threading Safety) ---
+# --- Definizione Classe App10eLotto (MODIFICATA leggermente per CV) ---
 class App10eLotto:
     def __init__(self, root):
         self.root = root
-        self.root.title("Analisi e Previsione 10eLotto (v7.1 - Thread Safe)") # Titolo aggiornato
-        self.root.geometry("850x910")
+        self.root.title("Analisi e Previsione 10eLotto (v8.0 - FE & CV)") # Titolo aggiornato
+        self.root.geometry("850x950") # Leggermente più alta per CV param
 
         self.style = ttk.Style()
         try:
@@ -502,14 +714,14 @@ class App10eLotto:
         self.params_container.columnconfigure(1, weight=1)
 
         # --- Colonna Sinistra: Parametri Dati ---
-        self.data_params_frame = ttk.LabelFrame(self.params_container, text="Parametri Dati", padding="10")
+        self.data_params_frame = ttk.LabelFrame(self.params_container, text="Parametri Dati e Previsione", padding="10")
         self.data_params_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="nsew")
         ttk.Label(self.data_params_frame, text="Data Inizio:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        default_start_10e = datetime.now() - pd.Timedelta(days=90)
+        default_start_10e = datetime.now() - pd.Timedelta(days=120) # Aumentato default per avere più dati
         if HAS_TKCALENDAR:
              self.start_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd')
              try: self.start_date_entry.set_date(default_start_10e)
-             except ValueError: self.start_date_entry.set_date(datetime.now() - pd.Timedelta(days=30))
+             except ValueError: self.start_date_entry.set_date(datetime.now() - pd.Timedelta(days=60))
              self.start_date_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
         else:
             self.start_date_entry = ttk.Entry(self.data_params_frame, width=12); self.start_date_entry.insert(0, default_start_10e.strftime('%Y-%m-%d'))
@@ -522,8 +734,8 @@ class App10eLotto:
             self.end_date_entry = ttk.Entry(self.data_params_frame, width=12); self.end_date_entry.insert(0, datetime.now().strftime('%Y-%m-%d'))
             self.end_date_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
         ttk.Label(self.data_params_frame, text="Seq. Input (Storia):").grid(row=2, column=0, padx=5, pady=5, sticky=tk.W)
-        self.seq_len_var = tk.StringVar(value="5")
-        self.seq_len_entry = ttk.Spinbox(self.data_params_frame, from_=1, to=50, textvariable=self.seq_len_var, width=5, wrap=True, state='readonly')
+        self.seq_len_var = tk.StringVar(value="7") # Aumentato leggermente default
+        self.seq_len_entry = ttk.Spinbox(self.data_params_frame, from_=2, to=50, textvariable=self.seq_len_var, width=5, wrap=True, state='readonly')
         self.seq_len_entry.grid(row=2, column=1, padx=5, pady=5, sticky=tk.W)
         ttk.Label(self.data_params_frame, text="Numeri da Prevedere:").grid(row=3, column=0, padx=5, pady=5, sticky=tk.W)
         self.num_predict_var = tk.StringVar(value="10")
@@ -533,48 +745,66 @@ class App10eLotto:
         # --- Colonna Destra: Parametri Modello e Training ---
         self.model_params_frame = ttk.LabelFrame(self.params_container, text="Configurazione Modello e Training", padding="10")
         self.model_params_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="nsew")
-        self.model_params_frame.columnconfigure(1, weight=1)
-        ttk.Label(self.model_params_frame, text="Hidden Layers (n,n,..):").grid(row=0, column=0, padx=5, pady=3, sticky=tk.W)
-        self.hidden_layers_var = tk.StringVar(value="512, 256, 128")
+        self.model_params_frame.columnconfigure(1, weight=1) # Permetti all'entry di espandersi
+        current_row = 0 # Usa un contatore per le righe
+
+        ttk.Label(self.model_params_frame, text="Hidden Layers (n,n,..):").grid(row=current_row, column=0, padx=5, pady=3, sticky=tk.W)
+        self.hidden_layers_var = tk.StringVar(value="256, 128") # Ridotto default per FE
         self.hidden_layers_entry = ttk.Entry(self.model_params_frame, textvariable=self.hidden_layers_var, width=25)
-        self.hidden_layers_entry.grid(row=0, column=1, padx=5, pady=3, sticky=tk.EW)
-        ttk.Label(self.model_params_frame, text="Loss Function:").grid(row=1, column=0, padx=5, pady=3, sticky=tk.W)
+        self.hidden_layers_entry.grid(row=current_row, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row += 1 # columnspan=2
+
+        ttk.Label(self.model_params_frame, text="Loss Function:").grid(row=current_row, column=0, padx=5, pady=3, sticky=tk.W)
         self.loss_var = tk.StringVar(value='binary_crossentropy')
         self.loss_combo = ttk.Combobox(self.model_params_frame, textvariable=self.loss_var, width=23, state='readonly', values=['binary_crossentropy', 'mse', 'mae', 'huber_loss'])
-        self.loss_combo.grid(row=1, column=1, padx=5, pady=3, sticky=tk.EW)
-        ttk.Label(self.model_params_frame, text="Optimizer:").grid(row=2, column=0, padx=5, pady=3, sticky=tk.W)
+        self.loss_combo.grid(row=current_row, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row += 1
+
+        ttk.Label(self.model_params_frame, text="Optimizer:").grid(row=current_row, column=0, padx=5, pady=3, sticky=tk.W)
         self.optimizer_var = tk.StringVar(value='adam')
         self.optimizer_combo = ttk.Combobox(self.model_params_frame, textvariable=self.optimizer_var, width=23, state='readonly', values=['adam', 'rmsprop', 'sgd', 'adagrad', 'adamw'])
-        self.optimizer_combo.grid(row=2, column=1, padx=5, pady=3, sticky=tk.EW)
-        ttk.Label(self.model_params_frame, text="Dropout Rate (0-1):").grid(row=3, column=0, padx=5, pady=3, sticky=tk.W)
-        self.dropout_var = tk.StringVar(value="0.35")
-        self.dropout_spinbox = ttk.Spinbox(self.model_params_frame, from_=0.0, to=0.8, increment=0.05, format="%.2f", textvariable=self.dropout_var, width=7, wrap=True, state='readonly')
-        self.dropout_spinbox.grid(row=3, column=1, padx=5, pady=3, sticky=tk.W)
-        ttk.Label(self.model_params_frame, text="L1 Strength (>=0):").grid(row=4, column=0, padx=5, pady=3, sticky=tk.W)
+        self.optimizer_combo.grid(row=current_row, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row += 1
+
+        # Parametri su stessa riga se possibile
+        param_frame_1 = ttk.Frame(self.model_params_frame); param_frame_1.grid(row=current_row, column=0, columnspan=3, sticky=tk.EW); current_row += 1
+        ttk.Label(param_frame_1, text="Dropout:").pack(side=tk.LEFT, padx=(5,2))
+        self.dropout_var = tk.StringVar(value="0.30") # Leggermente ridotto
+        self.dropout_spinbox = ttk.Spinbox(param_frame_1, from_=0.0, to=0.8, increment=0.05, format="%.2f", textvariable=self.dropout_var, width=5, wrap=True, state='readonly')
+        self.dropout_spinbox.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(param_frame_1, text="L1:").pack(side=tk.LEFT, padx=(5,2))
         self.l1_var = tk.StringVar(value="0.00")
-        self.l1_entry = ttk.Entry(self.model_params_frame, textvariable=self.l1_var, width=7)
-        self.l1_entry.grid(row=4, column=1, padx=5, pady=3, sticky=tk.W)
-        ttk.Label(self.model_params_frame, text="L2 Strength (>=0):").grid(row=5, column=0, padx=5, pady=3, sticky=tk.W)
+        self.l1_entry = ttk.Entry(param_frame_1, textvariable=self.l1_var, width=6)
+        self.l1_entry.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(param_frame_1, text="L2:").pack(side=tk.LEFT, padx=(5,2))
         self.l2_var = tk.StringVar(value="0.00")
-        self.l2_entry = ttk.Entry(self.model_params_frame, textvariable=self.l2_var, width=7)
-        self.l2_entry.grid(row=5, column=1, padx=5, pady=3, sticky=tk.W)
-        ttk.Label(self.model_params_frame, text="Max Epoche:").grid(row=6, column=0, padx=5, pady=3, sticky=tk.W)
-        self.epochs_var = tk.StringVar(value="100")
-        self.epochs_spinbox = ttk.Spinbox(self.model_params_frame, from_=10, to=1000, increment=10, textvariable=self.epochs_var, width=7, wrap=True, state='readonly')
-        self.epochs_spinbox.grid(row=6, column=1, padx=5, pady=3, sticky=tk.W)
-        ttk.Label(self.model_params_frame, text="Batch Size:").grid(row=7, column=0, padx=5, pady=3, sticky=tk.W)
-        self.batch_size_var = tk.StringVar(value="32")
-        batch_values = [str(2**i) for i in range(3, 9)]
-        self.batch_size_combo = ttk.Combobox(self.model_params_frame, textvariable=self.batch_size_var, values=batch_values, width=5, state='readonly')
-        self.batch_size_combo.grid(row=7, column=1, padx=5, pady=3, sticky=tk.W)
-        ttk.Label(self.model_params_frame, text="ES Patience:").grid(row=8, column=0, padx=5, pady=3, sticky=tk.W)
-        self.patience_var = tk.StringVar(value="15")
-        self.patience_spinbox = ttk.Spinbox(self.model_params_frame, from_=3, to=100, increment=1, textvariable=self.patience_var, width=7, wrap=True, state='readonly')
-        self.patience_spinbox.grid(row=8, column=1, padx=5, pady=3, sticky=tk.W)
-        ttk.Label(self.model_params_frame, text="ES Min Delta:").grid(row=9, column=0, padx=5, pady=3, sticky=tk.W)
-        self.min_delta_var = tk.StringVar(value="0.0001")
-        self.min_delta_entry = ttk.Entry(self.model_params_frame, textvariable=self.min_delta_var, width=10)
-        self.min_delta_entry.grid(row=9, column=1, padx=5, pady=3, sticky=tk.W)
+        self.l2_entry = ttk.Entry(param_frame_1, textvariable=self.l2_var, width=6)
+        self.l2_entry.pack(side=tk.LEFT, padx=(0,5))
+
+        param_frame_2 = ttk.Frame(self.model_params_frame); param_frame_2.grid(row=current_row, column=0, columnspan=3, sticky=tk.EW); current_row += 1
+        ttk.Label(param_frame_2, text="Max Epoche:").pack(side=tk.LEFT, padx=(5,2))
+        self.epochs_var = tk.StringVar(value="80") # Ridotto default
+        self.epochs_spinbox = ttk.Spinbox(param_frame_2, from_=10, to=500, increment=10, textvariable=self.epochs_var, width=5, wrap=True, state='readonly')
+        self.epochs_spinbox.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(param_frame_2, text="Batch Size:").pack(side=tk.LEFT, padx=(5,2))
+        self.batch_size_var = tk.StringVar(value="64") # Aumentato default
+        batch_values = [str(2**i) for i in range(4, 10)] # 16 a 512
+        self.batch_size_combo = ttk.Combobox(param_frame_2, textvariable=self.batch_size_var, values=batch_values, width=5, state='readonly')
+        self.batch_size_combo.pack(side=tk.LEFT, padx=(0,10))
+
+        param_frame_3 = ttk.Frame(self.model_params_frame); param_frame_3.grid(row=current_row, column=0, columnspan=3, sticky=tk.EW); current_row += 1
+        ttk.Label(param_frame_3, text="ES Patience:").pack(side=tk.LEFT, padx=(5,2))
+        self.patience_var = tk.StringVar(value="10") # Ridotto default
+        self.patience_spinbox = ttk.Spinbox(param_frame_3, from_=3, to=50, increment=1, textvariable=self.patience_var, width=4, wrap=True, state='readonly')
+        self.patience_spinbox.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(param_frame_3, text="ES Min Delta:").pack(side=tk.LEFT, padx=(5,2))
+        self.min_delta_var = tk.StringVar(value="0.0005") # Aumentato leggermente
+        self.min_delta_entry = ttk.Entry(param_frame_3, textvariable=self.min_delta_var, width=8)
+        self.min_delta_entry.pack(side=tk.LEFT, padx=(0,10))
+
+        # NUOVO: Parametro CV Splits
+        ttk.Label(self.model_params_frame, text="CV Splits (>=2):").grid(row=current_row, column=0, padx=5, pady=3, sticky=tk.W)
+        self.cv_splits_var = tk.StringVar(value=str(DEFAULT_CV_SPLITS))
+        self.cv_splits_spinbox = ttk.Spinbox(self.model_params_frame, from_=2, to=20, increment=1, textvariable=self.cv_splits_var, width=5, wrap=True, state='readonly')
+        self.cv_splits_spinbox.grid(row=current_row, column=1, padx=5, pady=3, sticky=tk.W); current_row += 1
+
 
         # --- Pulsanti Azione ---
         self.action_frame = ttk.Frame(self.main_frame)
@@ -592,25 +822,25 @@ class App10eLotto:
         self.results_frame = ttk.LabelFrame(self.main_frame, text="Risultato Previsione 10eLotto", padding="10")
         self.results_frame.pack(fill=tk.X, pady=5)
         self.result_label_var = tk.StringVar(value="I numeri previsti appariranno qui...")
-        self.result_label = ttk.Label(self.results_frame, textvariable=self.result_label_var, font=('Courier', 14, 'bold'), foreground='darkgreen')
+        self.result_label = ttk.Label(self.results_frame, textvariable=self.result_label_var, font=('Courier', 14, 'bold'), foreground='darkblue') # Colore cambiato
         self.result_label.pack(pady=5)
         self.attendibilita_label_var = tk.StringVar(value="")
-        self.attendibilita_label = ttk.Label(self.results_frame, textvariable=self.attendibilita_label_var, font=('Helvetica', 10, 'italic'))
-        self.attendibilita_label.pack(pady=2)
+        self.attendibilita_label = ttk.Label(self.results_frame, textvariable=self.attendibilita_label_var, font=('Helvetica', 9, 'italic')) # Font leggermente ridotto
+        self.attendibilita_label.pack(pady=2, fill=tk.X) # Fill X per andare a capo
 
         # --- Log Area ---
         self.log_frame = ttk.LabelFrame(self.main_frame, text="Log Elaborazione", padding="10")
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         log_font = ("Consolas", 9) if sys.platform == "win32" else ("Monospace", 9)
-        self.log_text = scrolledtext.ScrolledText(self.log_frame, height=15, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='white', foreground='black')
+        self.log_text = scrolledtext.ScrolledText(self.log_frame, height=18, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f0f0f0', foreground='black') # Sfondo leggermente grigio
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
         # --- Label Ultimo Aggiornamento ---
         self.last_update_label_var = tk.StringVar(value="Ultimo aggiornamento estrazionale: N/A")
-        self.last_update_label = ttk.Label(self.main_frame, textvariable=self.last_update_label_var, font=('Helvetica', 10, 'italic'))
-        self.last_update_label.pack(pady=5)
+        self.last_update_label = ttk.Label(self.main_frame, textvariable=self.last_update_label_var, font=('Helvetica', 9, 'italic'))
+        self.last_update_label.pack(pady=(5,0), anchor='w') # Allineato a sx
 
-        # === Modifiche per Threading Safety ===
+        # --- Threading Safety (Invariato) ---
         self.analysis_thread = None
         self.check_thread = None
         self._stop_event_analysis = threading.Event() # Evento per fermare l'analisi
@@ -618,9 +848,9 @@ class App10eLotto:
 
         # Intercetta la chiusura della finestra
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        # =====================================
 
-    # --- Metodi della Classe ---
+
+    # --- Metodi Classe (browse_file, log_message_gui, set_result, _update_result_labels INVARIATI) ---
 
     def browse_file(self):
         """Apre una finestra di dialogo per selezionare un file LOCALE."""
@@ -631,57 +861,51 @@ class App10eLotto:
 
     def log_message_gui(self, message):
         """Invia messaggio di log alla GUI in modo sicuro."""
-        # Usa la funzione globale che gestisce root.after
         log_message(message, self.log_text, self.root)
 
     def set_result(self, numbers, attendibilita):
         """Aggiorna le etichette dei risultati in modo sicuro."""
-        # Usa after per eseguire l'aggiornamento nel thread principale
         self.root.after(0, self._update_result_labels, numbers, attendibilita)
 
     def _update_result_labels(self, numbers, attendibilita):
         """Funzione helper eseguita da root.after per aggiornare le etichette."""
         try:
-            # Verifica se la finestra/widget esistono ancora
-            if not self.root.winfo_exists() or not self.result_label.winfo_exists():
-                return # Finestra chiusa, non fare nulla
+            if not self.root.winfo_exists() or not self.result_label.winfo_exists(): return
 
             if numbers and isinstance(numbers, list) and all(isinstance(n, int) for n in numbers):
-                 # RIMUOVI sorted() da qui per mantenere l'ordine di probabilità
-                 result_str = "  ".join(map(lambda x: f"{x:02d}", numbers)) # Senza sorted()
+                 result_str = "  ".join(map(lambda x: f"{x:02d}", numbers)) # Mantiene ordine prob.
                  self.result_label_var.set(result_str)
-                 self.log_message_gui("\n" + "="*30 + "\nPREVISIONE 10ELOTTO GENERATA (Ord. Probabilità)\n" + "="*30) # Aggiorna log
+                 self.log_message_gui("\n" + "="*30 + "\nPREVISIONE 10ELOTTO GENERATA (Ord. Probabilità)\n" + "="*30)
             else:
                 self.result_label_var.set("Previsione 10eLotto fallita. Controlla i log.")
                 log_err = True
                 if isinstance(attendibilita, str):
-                     if "Attendibilità" in attendibilita or "Errore" in attendibilita or "fallita" in attendibilita or "annullata" in attendibilita: log_err = False # Non loggare errori già noti
+                     if any(kw in attendibilita.lower() for kw in ["attendibilità", "errore", "fallita", "annullata", "interrotta"]): log_err = False
                 if log_err: self.log_message_gui("\nERRORE: Previsione 10eLotto non ha restituito numeri validi o ha fallito.")
-            self.attendibilita_label_var.set(str(attendibilita) if attendibilita else "")
-        except tk.TclError as e:
-            print(f"TclError in _update_result_labels (likely during shutdown): {e}")
-        except Exception as e:
-            print(f"Error in _update_result_labels: {e}")
+            # Mostra sempre il messaggio di attendibilità/errore
+            self.attendibilita_label_var.set(str(attendibilita) if attendibilita else "Nessuna informazione sull'attendibilità.")
+
+        except tk.TclError as e: print(f"TclError in _update_result_labels (likely during shutdown): {e}")
+        except Exception as e: print(f"Error in _update_result_labels: {e}")
 
 
+    # --- Metodo set_controls_state (MODIFICATO per aggiungere cv_splits_spinbox) ---
     def set_controls_state(self, state):
         """Imposta lo stato dei controlli in modo sicuro."""
-        # Usa after per eseguire l'aggiornamento nel thread principale
         self.root.after(0, lambda: self._set_controls_state_tk(state))
 
     def _set_controls_state_tk(self, state):
         """Funzione helper eseguita da root.after per impostare lo stato."""
         try:
-            # Verifica se la finestra esiste ancora
-            if not self.root.winfo_exists():
-                return
+            if not self.root.winfo_exists(): return
 
             widgets_to_toggle = [
                 self.browse_button, self.file_entry, self.seq_len_entry, self.num_predict_spinbox,
                 self.run_button, self.check_button, self.loss_combo, self.optimizer_combo,
                 self.dropout_spinbox, self.l1_entry, self.l2_entry, self.hidden_layers_entry,
                 self.epochs_spinbox, self.batch_size_combo, self.patience_spinbox, self.min_delta_entry,
-                self.check_colpi_spinbox
+                self.check_colpi_spinbox,
+                self.cv_splits_spinbox # NUOVO: Aggiunto spinbox CV
             ]
             # Gestione DateEntry/Entry
             date_widgets = []
@@ -692,9 +916,9 @@ class App10eLotto:
 
             # Applica stato ai widget principali
             for widget in widgets_to_toggle:
-                 if widget is None or not widget.winfo_exists(): continue # Salta widget non validi/distrutti
+                 if widget is None or not widget.winfo_exists(): continue
                  widget_state = state
-                 # Logica speciale per check_button (abilita solo se c'è previsione)
+                 # Logica speciale per check_button
                  if widget == self.check_button and state == tk.NORMAL:
                       if self.last_prediction is None or not isinstance(self.last_prediction, list):
                           widget_state = tk.DISABLED
@@ -709,18 +933,23 @@ class App10eLotto:
                  # Imposta lo stato effettivo
                  try:
                      current_widget_state = widget.cget('state')
-                     target_tk_state = tk.NORMAL if widget_state == tk.NORMAL else tk.DISABLED
-                     if isinstance(widget, (ttk.Combobox, ttk.Spinbox)):
-                         target_tk_state = 'readonly' if widget_state == tk.NORMAL else tk.DISABLED
-                     elif isinstance(widget, ttk.Entry) and not HAS_TKCALENDAR: # Non toccare DateEntry direttamente qui
-                         target_tk_state = tk.NORMAL if widget_state == tk.NORMAL else tk.DISABLED
+                     # Default a tk.DISABLED se lo stato richiesto non è tk.NORMAL
+                     target_tk_state = tk.DISABLED
+                     if widget_state == tk.NORMAL:
+                         if isinstance(widget, (ttk.Combobox, ttk.Spinbox)):
+                             target_tk_state = 'readonly'
+                         elif isinstance(widget, ttk.Entry):
+                             target_tk_state = tk.NORMAL
+                         elif isinstance(widget, ttk.Button):
+                             target_tk_state = tk.NORMAL
+                         # Altri tipi di widget potrebbero avere stati diversi
 
                      # Cambia stato solo se necessario
-                     if str(current_widget_state) != str(target_tk_state):
+                     if str(current_widget_state).lower() != str(target_tk_state).lower():
                          widget.config(state=target_tk_state)
                  except (tk.TclError, AttributeError) as e_widget:
                      print(f"Warning: Could not set state for widget {widget}: {e_widget}")
-                     pass # Ignora errori se widget non esiste/è distrutto o non ha 'state'
+                     pass
 
             # Applica stato ai DateEntry (se tkcalendar è usato)
             for date_widget in date_widgets:
@@ -728,18 +957,17 @@ class App10eLotto:
                 try:
                     target_tk_state = tk.NORMAL if state == tk.NORMAL else tk.DISABLED
                     current_widget_state = date_widget.cget('state')
-                    if str(current_widget_state) != str(target_tk_state):
+                    if str(current_widget_state).lower() != str(target_tk_state).lower():
                         date_widget.configure(state=target_tk_state)
                 except (tk.TclError, AttributeError, Exception) as e_date:
                      print(f"Warning: Could not set state for DateEntry {date_widget}: {e_date}")
                      pass
 
-        except tk.TclError as e:
-            print(f"TclError in _set_controls_state_tk (likely during shutdown): {e}")
-        except Exception as e:
-            print(f"Error setting control states: {e}")
+        except tk.TclError as e: print(f"TclError in _set_controls_state_tk (likely during shutdown): {e}")
+        except Exception as e: print(f"Error setting control states: {e}")
 
 
+    # --- Metodo start_analysis_thread (MODIFICATO per leggere n_cv_splits) ---
     def start_analysis_thread(self):
         if self.analysis_thread and self.analysis_thread.is_alive(): messagebox.showwarning("Analisi in Corso", "Analisi 10eLotto già in esecuzione.", parent=self.root); return
         if self.check_thread and self.check_thread.is_alive(): messagebox.showwarning("Verifica in Corso", "Verifica 10eLotto in corso. Attendi.", parent=self.root); return
@@ -748,8 +976,9 @@ class App10eLotto:
         self.log_text.config(state=tk.NORMAL); self.log_text.delete('1.0', tk.END); self.log_text.config(state=tk.DISABLED)
         self.result_label_var.set("Analisi 10eLotto in corso..."); self.attendibilita_label_var.set("")
         self.last_prediction = None; self.last_prediction_end_date = None; self.last_prediction_date_str = None
-        self.check_button.config(state=tk.DISABLED)
+        self.check_button.config(state=tk.DISABLED) # Disabilita subito
 
+        # Recupero valori dai widget
         data_source = self.file_path_var.get().strip()
         start_date_str, end_date_str = "", ""
         try:
@@ -761,19 +990,22 @@ class App10eLotto:
         hidden_layers_str, loss_function, optimizer = self.hidden_layers_var.get(), self.loss_var.get(), self.optimizer_var.get()
         dropout_str, l1_str, l2_str = self.dropout_var.get(), self.l1_var.get(), self.l2_var.get()
         epochs_str, batch_size_str, patience_str, min_delta_str = self.epochs_var.get(), self.batch_size_var.get(), self.patience_var.get(), self.min_delta_var.get()
+        cv_splits_str = self.cv_splits_var.get() # NUOVO: Leggi CV splits
 
-        errors = []; sequence_length, num_predictions = 5, 10; hidden_layers_config = [512, 256, 128]
-        dropout_rate, l1_reg, l2_reg = 0.35, 0.0, 0.0; max_epochs, batch_size, patience, min_delta = 100, 32, 15, 0.0001
+        # Validazione e conversione
+        errors = []; sequence_length, num_predictions = 7, 10; hidden_layers_config = [256, 128]
+        dropout_rate, l1_reg, l2_reg = 0.30, 0.0, 0.0; max_epochs, batch_size, patience, min_delta = 80, 64, 10, 0.0005
+        n_cv_splits = DEFAULT_CV_SPLITS # NUOVO: Default CV splits
 
         if not data_source: errors.append("Specificare un URL Raw GitHub o un percorso file locale per 10eLotto.")
-        elif not data_source.startswith("http://") and not data_source.startswith("https://"):
+        elif not data_source.startswith(("http://", "https://")):
             if not os.path.exists(data_source): errors.append(f"File locale 10eLotto non trovato:\n{data_source}")
             elif not data_source.lower().endswith(".txt"): errors.append("Il file locale 10eLotto dovrebbe essere .txt.")
 
-        try: start_dt, end_dt = datetime.strptime(start_date_str, '%Y-%m-%d'), datetime.strptime(end_date_str, '%Y-%m-%d'); assert start_dt <= end_dt
+        try: start_dt = datetime.strptime(start_date_str, '%Y-%m-%d'); end_dt = datetime.strptime(end_date_str, '%Y-%m-%d'); assert start_dt <= end_dt
         except: errors.append("Date 10eLotto non valide o inizio > fine.")
-        try: sequence_length = int(seq_len_str); assert 1 <= sequence_length <= 50
-        except: errors.append("Seq. Input 10eLotto non valida (1-50).")
+        try: sequence_length = int(seq_len_str); assert 2 <= sequence_length <= 50 # Min 2
+        except: errors.append("Seq. Input 10eLotto non valida (2-50).")
         try: num_predictions = int(num_predict_str); assert 1 <= num_predictions <= 10
         except: errors.append("Numeri da Prevedere 10eLotto non validi (1-10).")
         try: hidden_layers_config = [int(x.strip()) for x in hidden_layers_str.split(',') if x.strip()]; assert hidden_layers_config and all(n > 0 for n in hidden_layers_config)
@@ -788,70 +1020,72 @@ class App10eLotto:
         except: errors.append("L2 Strength 10eLotto non valido (>= 0).")
         try: max_epochs = int(epochs_str); assert max_epochs >= 10
         except: errors.append("Max Epoche 10eLotto non valido (>= 10).")
-        try: batch_size = int(batch_size_str); assert batch_size > 0 and (batch_size & (batch_size - 1) == 0)
-        except: errors.append("Batch Size 10eLotto non valido (potenza di 2 > 0).")
+        try: batch_size = int(batch_size_str); assert batch_size >= 8 and (batch_size & (batch_size - 1) == 0) # Potenza di 2 >= 8
+        except: errors.append("Batch Size 10eLotto non valido (potenza di 2 >= 8).")
         try: patience = int(patience_str); assert patience >= 3
         except: errors.append("Patience 10eLotto non valida (>= 3).")
         try: min_delta = float(min_delta_str); assert min_delta >= 0
         except: errors.append("Min Delta 10eLotto non valido (>= 0).")
+        # NUOVO: Validazione CV splits
+        try: n_cv_splits = int(cv_splits_str); assert 2 <= n_cv_splits <= 20
+        except: errors.append(f"Numero CV Splits non valido (intero 2-20).")
+
 
         if errors: messagebox.showerror("Errore Parametri Input 10eLotto", "\n\n".join(errors), parent=self.root); self.result_label_var.set("Errore parametri."); return
         #</editor-fold>
 
         self.set_controls_state(tk.DISABLED)
         source_type = "URL" if data_source.startswith("http") else "File Locale"
-        self.log_message_gui("=== Avvio Analisi 10eLotto ===")
+        self.log_message_gui("=== Avvio Analisi 10eLotto (FE & CV) ===")
         self.log_message_gui(f"Sorgente Dati: {source_type} ({data_source})")
         self.log_message_gui(f"Param Dati: Date={start_date_str}-{end_date_str}, SeqIn={sequence_length}, NumOut={num_predictions}")
         self.log_message_gui(f"Param Modello: Layers={hidden_layers_config}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate:.2f}, L1={l1_reg:.4f}, L2={l2_reg:.4f}")
-        self.log_message_gui(f"Param Training: Epochs={max_epochs}, Batch={batch_size}, Pat={patience}, MinDelta={min_delta:.5f}")
+        self.log_message_gui(f"Param Training: Epochs={max_epochs}, Batch={batch_size}, CV Splits={n_cv_splits}, Pat={patience}, MinDelta={min_delta:.5f}") # Log CV Splits
         self.log_message_gui("-" * 40)
 
-        # === Modifica: Resetta l'evento di stop e avvia il thread ===
-        self._stop_event_analysis.clear() # Assicurati che l'evento sia resettato
+        # Resetta evento di stop e avvia thread
+        self._stop_event_analysis.clear()
         self.analysis_thread = threading.Thread(
             target=self.run_analysis,
-            args=( # Passa anche l'evento di stop
+            args=( # Passa tutti i parametri, incluso n_cv_splits e stop_event
                 data_source, start_date_str, end_date_str, sequence_length,
                 loss_function, optimizer, dropout_rate, l1_reg, l2_reg,
                 hidden_layers_config, max_epochs, batch_size, patience, min_delta,
-                num_predictions,
-                self._stop_event_analysis # <<< Passa l'evento
+                num_predictions, n_cv_splits, # Passa n_cv_splits
+                self._stop_event_analysis # Passa l'evento
             ),
-            daemon=True, # Lascia daemon=True, on_close gestirà l'attesa
-            name="AnalysisThread" # Dà un nome al thread per debug
+            daemon=True,
+            name="AnalysisThread"
         )
         self.analysis_thread.start()
-        # ==========================================================
 
+    # --- Metodo run_analysis (MODIFICATO per passare n_cv_splits) ---
     def run_analysis(self, data_source, start_date, end_date, sequence_length,
                      loss_function, optimizer, dropout_rate, l1_reg, l2_reg,
                      hidden_layers_config, max_epochs, batch_size, patience, min_delta,
-                     num_predictions, stop_event): # <<< Riceve l'evento
+                     num_predictions, n_cv_splits, # Riceve n_cv_splits
+                     stop_event):
         """Esegue l'analisi 10eLotto nel thread, controllando stop_event."""
         numeri_predetti, attendibilita_msg, success = None, "Analisi 10eLotto non completata", False
-        last_update_date = "N/A" # Default
+        last_update_date = "N/A"
         try:
-            # Controllo iniziale stop_event
             if stop_event.is_set():
                 self.log_message_gui("Analisi annullata prima dell'inizio.")
                 attendibilita_msg = "Analisi annullata"
-                return # Esce subito
+                return
 
-            # --- Carica dati (non richiede controllo stop interno) ---
-            df, _, _, _ = carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callback=self.log_message_gui)
-            if df is not None and not df.empty:
-                last_update_date = df['Data'].max().strftime('%Y-%m-%d')
-            # Aggiorna l'etichetta dell'ultimo aggiornamento (sicuro con after)
+            # --- Carica dati per data max ---
+            df_full, _, _, _ = carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callback=None) # Carica silenzioso
+            if df_full is not None and not df_full.empty:
+                last_update_date = df_full['Data'].max().strftime('%Y-%m-%d')
             self.root.after(0, self.last_update_label_var.set, f"Ultimo aggiornamento estrazionale: {last_update_date}")
 
-            # Controllo stop dopo caricamento iniziale (per data max)
             if stop_event.is_set():
                 self.log_message_gui("Analisi annullata dopo caricamento data max.")
                 attendibilita_msg = "Analisi annullata"
                 return
 
-            # --- Esegui l'analisi vera e propria, passando lo stop_event ---
+            # --- Esegui l'analisi vera e propria con CV ---
             numeri_predetti, attendibilita_msg = analisi_10elotto(
                 file_path=data_source, start_date=start_date, end_date=end_date,
                 sequence_length=sequence_length, loss_function=loss_function,
@@ -859,13 +1093,17 @@ class App10eLotto:
                 l2_reg=l2_reg, hidden_layers_config=hidden_layers_config,
                 max_epochs=max_epochs, batch_size=batch_size, patience=patience,
                 min_delta=min_delta, num_predictions=num_predictions,
+                n_cv_splits=n_cv_splits, # Passa n_cv_splits
                 log_callback=self.log_message_gui,
-                stop_event=stop_event # <<< Passa l'evento alla funzione core
+                stop_event=stop_event # Passa l'evento
             )
-            # Verifica se l'analisi è stata annullata DALLA funzione analisi_10elotto
+
+            # Verifica se annullato DALLA funzione analisi_10elotto
             if stop_event.is_set() and numeri_predetti is None:
                  self.log_message_gui("Analisi interrotta durante l'elaborazione.")
-                 attendibilita_msg = "Analisi Interrotta" # Sovrascrive messaggio
+                 # attendibilita_msg dovrebbe già essere impostato da analisi_10elotto
+                 if not attendibilita_msg or "interrotta" not in attendibilita_msg.lower():
+                     attendibilita_msg = "Analisi Interrotta" # Messaggio di fallback
                  success = False
             else:
                  # Valuta successo normale
@@ -875,39 +1113,37 @@ class App10eLotto:
             self.log_message_gui(f"\nERRORE CRITICO run_analysis 10eLotto: {e}\n{traceback.format_exc()}")
             attendibilita_msg = f"Errore critico 10eLotto: {e}"; success = False
         finally:
-            # Registra il completamento solo se non annullato esplicitamente
+            # Log completamento solo se non annullato
             if not stop_event.is_set():
-                 self.log_message_gui("\n=== Analisi 10eLotto Completata ===")
+                 self.log_message_gui("\n=== Analisi 10eLotto (FE & CV) Completata ===")
 
-            # Aggiorna i risultati e controlli (usando self.set_result che usa after)
+            # Aggiorna risultati e controlli
             self.set_result(numeri_predetti, attendibilita_msg)
 
-            if success: # Solo se l'analisi ha avuto successo E non è stata annullata
+            if success: # Solo se successo E non annullato
                 self.last_prediction = numeri_predetti
                 try:
                     self.last_prediction_end_date = datetime.strptime(end_date, '%Y-%m-%d')
                     self.last_prediction_date_str = end_date
                     self.log_message_gui(f"Previsione 10eLotto salvata (dati fino a {end_date}).")
                 except ValueError:
-                    self.log_message_gui(f"ATTENZIONE: Errore salvataggio data fine 10eLotto ({end_date}). Verifica non possibile."); success = False # Rendi non verificabile
-            else: # Se non successo o annullato
+                    self.log_message_gui(f"ATTENZIONE: Errore salvataggio data fine 10eLotto ({end_date}). Verifica non possibile."); success = False
+            else:
                  self.last_prediction = None; self.last_prediction_end_date = None; self.last_prediction_date_str = None
-                 # Non loggare fallimento se è stato annullato o l'errore è già in attendibilita_msg
                  if not stop_event.is_set() and (not attendibilita_msg or not any(kw in attendibilita_msg.lower() for kw in ["errore", "fallita", "annullata", "interrotta"])):
                      self.log_message_gui("Analisi 10eLotto fallita o risultato non valido.")
 
-            # Riabilita i controlli (usa self.set_controls_state che usa after)
+            # Riabilita controlli e pulisci ref thread
             self.set_controls_state(tk.NORMAL)
-            # Pulisci il riferimento al thread *dopo* che tutti gli after sono stati schedulati
-            self.root.after(10, self._clear_analysis_thread_ref)
+            self.root.after(10, self._clear_analysis_thread_ref) # Usa helper
 
+
+    # --- Metodi _clear_analysis_thread_ref, start_check_thread, run_check_results, _clear_check_thread_ref, on_close (INVARIATI) ---
     def _clear_analysis_thread_ref(self):
         """Helper per pulire il riferimento al thread nel thread principale."""
         self.analysis_thread = None
-        # Potrebbe essere necessario ri-valutare lo stato dei pulsanti qui
-        # se la verifica era disabilitata a causa dell'analisi
+        # Ri-valuta stato controlli
         self._set_controls_state_tk(tk.NORMAL)
-
 
     def start_check_thread(self):
         if self.check_thread and self.check_thread.is_alive(): messagebox.showwarning("Verifica in Corso", "Verifica 10eLotto già in esecuzione.", parent=self.root); return
@@ -939,32 +1175,29 @@ class App10eLotto:
         self.log_message_gui(f"Usando sorgente dati per verifica: {source_type} ({data_source_for_check})")
         self.log_message_gui("-" * 40)
 
-        # === Modifica: Resetta l'evento di stop e avvia il thread ===
-        self._stop_event_check.clear() # Resetta l'evento
+        # Resetta evento di stop e avvia thread
+        self._stop_event_check.clear()
         self.check_thread = threading.Thread(
             target=self.run_check_results,
             args=( data_source_for_check, self.last_prediction, self.last_prediction_date_str, num_colpi,
-                   self._stop_event_check ), # <<< Passa l'evento
+                   self._stop_event_check ), # Passa l'evento
             daemon=True,
-            name="CheckThread" # Nome per debug
+            name="CheckThread"
         )
         self.check_thread.start()
-        # =========================================================
 
-    def run_check_results(self, data_source, prediction_to_check, last_analysis_date_str, num_colpi_to_check, stop_event): # <<< Riceve l'evento
+    def run_check_results(self, data_source, prediction_to_check, last_analysis_date_str, num_colpi_to_check, stop_event):
         """Carica dati successivi e verifica la previsione, controllando stop_event."""
         try:
             try:
                 last_date = datetime.strptime(last_analysis_date_str, '%Y-%m-%d'); check_start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
             except ValueError as ve: self.log_message_gui(f"ERRORE formato data analisi 10eLotto: {ve}"); return
 
-            # Controllo stop prima di caricare dati
             if stop_event.is_set(): self.log_message_gui("Verifica annullata prima del caricamento dati."); return
 
             self.log_message_gui(f"Caricamento dati 10eLotto per verifica da {check_start_date}...")
             df_check, numeri_array_check, _, _ = carica_dati_10elotto( data_source, start_date=check_start_date, end_date=None, log_callback=self.log_message_gui )
 
-            # Controllo stop dopo caricamento dati
             if stop_event.is_set(): self.log_message_gui("Verifica annullata dopo caricamento dati."); return
 
             if df_check is None: self.log_message_gui("ERRORE: Caricamento dati verifica 10eLotto fallito."); return
@@ -978,10 +1211,9 @@ class App10eLotto:
             colpo_counter = 0; found_hits_total = 0; highest_score = 0
 
             for i in range(num_to_run):
-                # Controllo stop all'inizio di ogni iterazione del loop
                 if stop_event.is_set():
                     self.log_message_gui(f"Verifica interrotta al colpo {colpo_counter + 1}.")
-                    break # Esce dal loop
+                    break
 
                 colpo_counter += 1
                 try:
@@ -998,7 +1230,6 @@ class App10eLotto:
                 except IndexError: self.log_message_gui(f"ERR: Indice {i} fuori range verifica 10eLotto"); break
                 except Exception as e_row: self.log_message_gui(f"ERR imprevisto colpo {colpo_counter} 10eLotto: {e_row}")
 
-            # Log finale solo se il loop non è stato interrotto bruscamente
             if not stop_event.is_set():
                  self.log_message_gui("-" * 40)
                  if found_hits_total == 0: self.log_message_gui(f"Nessun colpo vincente nei {num_to_run} colpi 10eLotto verificati.")
@@ -1007,42 +1238,32 @@ class App10eLotto:
         except Exception as e:
             self.log_message_gui(f"ERRORE CRITICO verifica 10eLotto: {e}\n{traceback.format_exc()}")
         finally:
-             # Registra completamento solo se non annullato
              if not stop_event.is_set():
                  self.log_message_gui("\n=== Verifica 10eLotto Completata ===")
-             # Riabilita controlli e pulisci riferimento al thread
              self.set_controls_state(tk.NORMAL)
-             self.root.after(10, self._clear_check_thread_ref)
+             self.root.after(10, self._clear_check_thread_ref) # Usa helper
 
     def _clear_check_thread_ref(self):
         """Helper per pulire il riferimento al thread nel thread principale."""
         self.check_thread = None
-        # Ri-valuta stato controlli
         self._set_controls_state_tk(tk.NORMAL)
 
-
-    # === Metodo Nuovo: Gestione Chiusura Finestra ===
     def on_close(self):
         """Gestisce la richiesta di chiusura della finestra (pulsante X)."""
         self.log_message_gui("Richiesta chiusura finestra...")
 
-        # 1. Segnala ai thread di fermarsi impostando gli eventi
+        # 1. Segnala stop
         self._stop_event_analysis.set()
         self._stop_event_check.set()
 
-        # 2. Attendi che i thread terminino (con un timeout)
-        timeout_secs = 3.0 # Attendi massimo 3 secondi per thread
+        # 2. Attendi thread (con timeout)
+        timeout_secs = 3.0
         wait_start = time.time()
         threads_to_wait = []
-
-        # Controlla se i thread esistono e sono vivi *prima* di aggiungerli
-        analysis_thread_local = self.analysis_thread # Copia locale per race condition minima
-        if analysis_thread_local and analysis_thread_local.is_alive():
-            threads_to_wait.append(analysis_thread_local)
-
-        check_thread_local = self.check_thread # Copia locale
-        if check_thread_local and check_thread_local.is_alive():
-            threads_to_wait.append(check_thread_local)
+        analysis_thread_local = self.analysis_thread
+        if analysis_thread_local and analysis_thread_local.is_alive(): threads_to_wait.append(analysis_thread_local)
+        check_thread_local = self.check_thread
+        if check_thread_local and check_thread_local.is_alive(): threads_to_wait.append(check_thread_local)
 
         if threads_to_wait:
             self.log_message_gui(f"Attendo terminazione thread: {[t.name for t in threads_to_wait]} (max {timeout_secs}s)")
@@ -1050,37 +1271,29 @@ class App10eLotto:
                 remaining_timeout = max(0.1, timeout_secs - (time.time() - wait_start))
                 try:
                     thread.join(timeout=remaining_timeout)
-                    if thread.is_alive():
-                        self.log_message_gui(f"ATTENZIONE: Timeout attesa {thread.name}. Potrebbe terminare bruscamente.")
-                    else:
-                         self.log_message_gui(f"Thread {thread.name} terminato correttamente.")
+                    log_level = "ATTENZIONE" if thread.is_alive() else "INFO"
+                    status = "non terminato (timeout)" if thread.is_alive() else "terminato"
+                    self.log_message_gui(f"{log_level}: Thread {thread.name} {status}.")
                 except Exception as e:
                     self.log_message_gui(f"Errore durante join di {thread.name}: {e}")
         else:
             self.log_message_gui("Nessun thread attivo da attendere.")
 
-        # 3. Distruggi la finestra principale *solo dopo* aver atteso i thread
+        # 3. Distruggi finestra
         self.log_message_gui("Distruzione finestra Tkinter.")
         try:
-             # Pulisci riferimenti ai thread PRIMA di distruggere
              self.analysis_thread = None
              self.check_thread = None
              self.root.destroy()
-        except tk.TclError as e:
-             print(f"TclError durante root.destroy() (potrebbe essere già in chiusura): {e}")
-        except Exception as e:
-             print(f"Errore imprevisto durante root.destroy(): {e}")
-    # ===============================================
-
+        except tk.TclError as e: print(f"TclError durante root.destroy(): {e}")
+        except Exception as e: print(f"Errore imprevisto durante root.destroy(): {e}")
 
 # --- Funzione di Lancio (INVARIATA) ---
 def launch_10elotto_window(parent_window):
     """Crea e lancia la finestra dell'applicazione 10eLotto come Toplevel."""
     try:
         lotto_win = tk.Toplevel(parent_window)
-        # Non impostare geometry qui se App10eLotto la imposta già
-        # lotto_win.geometry("850x910")
-        app_instance = App10eLotto(lotto_win) # L'init imposta titolo e geometria
+        app_instance = App10eLotto(lotto_win)
         lotto_win.lift()
         lotto_win.focus_force()
     except NameError as ne:
@@ -1093,8 +1306,9 @@ def launch_10elotto_window(parent_window):
 # --- Blocco Esecuzione Standalone (INVARIATO) ---
 if __name__ == "__main__":
     print("Esecuzione di elotto_module.py in modalità standalone...")
-    print("NOTA: Questo script richiede l'installazione della libreria 'requests'.")
-    print("Puoi installarla con: pip install requests")
+    print("NOTA: Questo script richiede l'installazione delle librerie 'requests', 'tensorflow', 'pandas', 'numpy', 'scikit-learn'.")
+    print("      Potrebbe richiedere anche 'tkcalendar' (opzionale).")
+    print("Puoi installarle con: pip install requests tensorflow pandas numpy scikit-learn tkcalendar")
     try:
         if sys.platform == "win32": from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1)
     except Exception as e_dpi: print(f"Nota: impossibile impostare DPI awareness ({e_dpi})")

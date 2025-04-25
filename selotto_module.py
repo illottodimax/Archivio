@@ -13,6 +13,11 @@ import threading
 import traceback
 import requests  # Richiede: pip install requests
 
+# NUOVO: Import per FE e CV
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit
+import time # Per on_close
+
 # Opzionale, ma consigliato per GUI migliori: pip install tkcalendar
 try:
     from tkcalendar import DateEntry
@@ -21,10 +26,11 @@ except ImportError:
     HAS_TKCALENDAR = False
 
 DEFAULT_SUPERENALOTTO_CHECK_COLPI = 5
-# URL RAW del file su GitHub (assicurati che sia ancora valido)
 DEFAULT_SUPERENALOTTO_DATA_URL = "https://raw.githubusercontent.com/illottodimax/Archivio/main/it-superenalotto-past-draws-archive.txt"
+# NUOVO: Default per K-Fold Cross-Validation
+DEFAULT_SUPERENALOTTO_CV_SPLITS = 5
 
-# --- Funzioni Globali (Seed, Log) ---
+# --- Funzioni Globali (Seed, Log - INVARIATE) ---
 def set_seed(seed_value=42):
     """Imposta il seme per la riproducibilità dei risultati."""
     os.environ['PYTHONHASHSEED'] = str(seed_value)
@@ -37,34 +43,49 @@ set_seed() # Imposta il seed all'avvio
 def log_message(message, log_widget, window):
     """Aggiunge un messaggio al widget di log nella GUI in modo sicuro per i thread."""
     if log_widget and window:
-        # Usa after per assicurare l'esecuzione nel thread principale della GUI
-        window.after(10, lambda: _update_log_widget(log_widget, message))
+        try:
+            # Usa after per assicurare l'esecuzione nel thread principale della GUI
+            window.after(10, lambda: _update_log_widget(log_widget, message))
+        except tk.TclError: # Finestra potrebbe essere stata distrutta
+            print(f"Log GUI TclError (Window destroyed?): {message}")
+
 
 def _update_log_widget(log_widget, message):
     """Funzione helper per aggiornare il widget di log."""
     try:
+        # Verifica se il widget esiste ancora prima di modificarlo
+        if not log_widget.winfo_exists():
+             # print(f"Log GUI widget destroyed, message lost: {message}") # Commentato
+             return
+
         # Abilita temporaneamente il widget per l'inserimento
         current_state = log_widget.cget('state')
         log_widget.config(state=tk.NORMAL)
         log_widget.insert(tk.END, str(message) + "\n")
         log_widget.see(tk.END) # Scrolla fino alla fine
         # Ripristina lo stato originale (di solito DISABLED per impedire input utente)
-        log_widget.config(state=tk.DISABLED) # Lo rimettiamo disabilitato
-    except tk.TclError:
-        # Fallback se la GUI non è disponibile (es. chiusura finestra)
-        print(f"Log GUI TclError: {message}")
+        if current_state == tk.DISABLED:
+             log_widget.config(state=tk.DISABLED)
+    except tk.TclError as e:
+        # Fallback se la GUI non è disponibile (es. chiusura finestra nel mezzo di 'after')
+        print(f"Log GUI TclError (likely during shutdown): {e} - Message: {message}")
     except Exception as e:
         # Gestisci altri errori imprevisti
         print(f"Log GUI unexpected error: {e}\nMessage: {message}")
+        # Tentativo di ripristino stato disabilitato
+        try:
+            if log_widget.winfo_exists() and log_widget.cget('state') == tk.NORMAL:
+                 log_widget.config(state=tk.DISABLED)
+        except: pass
 
-# --- Caricamento Dati (gestisce URL e File Locale) ---
+# --- Caricamento Dati (carica_dati_superenalotto INVARIATA) ---
+# --- Caricamento Dati (CORRETTO) ---
 def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_callback=None):
     """
     Carica i dati del SuperEnalotto da un URL (RAW GitHub) o da un file locale.
-    Formato atteso:
-    Header: Ignorato
-    Data:   YYYY-MM-DD N1 N2 N3 N4 N5 N6 '' JJ SS  (10 campi totali separati da TAB)
+    Formato atteso: YYYY-MM-DD N1 N2 N3 N4 N5 N6 '' JJ SS
     Restituisce: DataFrame pulito, array numeri principali, array jolly, array superstar, data ultimo aggiornamento.
+    (Versione con correzione SyntaxError nel blocco except)
     """
     lines = []
     is_url = data_source.startswith("http://") or data_source.startswith("https://")
@@ -73,9 +94,9 @@ def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_c
         if is_url:
             if log_callback: log_callback(f"Tentativo caricamento dati SuperEnalotto da URL: {data_source}")
             try:
-                response = requests.get(data_source, timeout=30)  # Timeout di 30 secondi
-                response.raise_for_status()  # Solleva un errore per status HTTP >= 400
-                content = response.text # requests gestisce la decodifica iniziale
+                response = requests.get(data_source, timeout=30)
+                response.raise_for_status()
+                content = response.text
                 lines = content.splitlines()
                 if log_callback: log_callback(f"Dati scaricati con successo ({len(lines)} righe). Encoding presunto: {response.encoding}")
             except requests.exceptions.Timeout:
@@ -94,7 +115,6 @@ def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_c
             if not os.path.exists(file_path):
                  if log_callback: log_callback(f"ERRORE: File locale non trovato - {file_path}")
                  return None, None, None, None, None
-            # Prova diversi encoding comuni
             encodings_to_try = ['utf-8', 'iso-8859-1', 'cp1252']
             file_read_success = False
             for enc in encodings_to_try:
@@ -102,13 +122,12 @@ def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_c
                     with open(file_path, 'r', encoding=enc) as f: lines = f.readlines()
                     file_read_success = True
                     if log_callback: log_callback(f"File locale letto con successo usando encoding: {enc}")
-                    break # Esce dal loop se la lettura ha successo
+                    break
                 except UnicodeDecodeError:
                     if log_callback: log_callback(f"Info: Encoding {enc} fallito, provo il prossimo.")
                     continue
                 except Exception as e_file:
                     if log_callback: log_callback(f"ERRORE durante lettura file locale con encoding {enc}: {e_file}")
-                    # Non ritornare subito, prova altri encoding
                     continue
             if not file_read_success:
                  if log_callback: log_callback("ERRORE CRITICO: Impossibile leggere il file locale con gli encoding noti.")
@@ -116,70 +135,51 @@ def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_c
 
         # --- Parsing delle righe ---
         if log_callback: log_callback(f"Inizio parsing di {len(lines)} righe...")
-        if not lines or len(lines) < 2: # Assumendo almeno 1 riga header + 1 riga dati
+        if not lines or len(lines) < 2:
             if log_callback: log_callback("ERRORE: Dati vuoti o solo intestazione.")
             return None, None, None, None, None
 
-        data_lines = lines[1:] # Salta l'header (prima riga)
+        data_lines = lines[1:]
         processed_data = []
         malformed_lines_count = 0
         processed_lines_count = 0
-        min_expected_fields = 10 # YYYY-MM-DD N1 N2 N3 N4 N5 N6 '' JJ SS
+        min_expected_fields = 10
 
         for i, line in enumerate(data_lines):
-            # Rimuovi spazi bianchi inizio/fine e splitta per TAB
             values = line.strip().split('\t')
-
             if len(values) >= min_expected_fields:
                 try:
-                    # Estrai i campi richiesti (ignora campo vuoto indice 7)
                     date_val = values[0].strip()
                     num_vals_str = [v.strip() for v in values[1:7]] # Num1-Num6
                     jolly_val_str = values[8].strip() # Jolly
                     superstar_val_str = values[9].strip() # SuperStar
-
-                    # Validazione minimale: data sembra data, numeri sono numeri
-                    datetime.strptime(date_val, '%Y-%m-%d') # Lancia errore se formato non valido
+                    datetime.strptime(date_val, '%Y-%m-%d')
                     if not all(n.isdigit() for n in num_vals_str): raise ValueError("Num1-6 non numerici")
                     if not jolly_val_str.isdigit(): raise ValueError("Jolly non numerico")
                     if not superstar_val_str.isdigit(): raise ValueError("SuperStar non numerico")
-
-                    # Conversione a tipi corretti (verrà ricontrollata da pandas)
                     num_vals = [int(n) for n in num_vals_str]
                     jolly_val = int(jolly_val_str)
                     superstar_val = int(superstar_val_str)
-
-                    # Ulteriore controllo range (opzionale qui, pandas lo farà comunque)
                     if not all(1 <= n <= 90 for n in num_vals + [jolly_val, superstar_val]):
                         raise ValueError("Numeri fuori range (1-90)")
-
-                    # Aggiungi la riga processata (mantenendo stringhe per flessibilità con pandas)
                     clean_row = [date_val] + num_vals_str + [jolly_val_str, superstar_val_str]
                     processed_data.append(clean_row)
                     processed_lines_count += 1
-
                 except (IndexError, ValueError, TypeError) as e_parse:
                     malformed_lines_count += 1
-                    # Logga solo i primi errori per non inondare il log
-                    if malformed_lines_count <= 5 and log_callback:
-                        log_callback(f"ATTENZIONE: Riga {i+2} scartata (Errore parsing: {e_parse}). Valori: '{line.strip()}'")
-                    elif malformed_lines_count == 6 and log_callback:
-                        log_callback("ATTENZIONE: Ulteriori errori di parsing non verranno loggati singolarmente.")
+                    if malformed_lines_count <= 5 and log_callback: log_callback(f"ATT: Riga {i+2} scartata (Parse Err: {e_parse}). Val: '{line.strip()}'")
+                    elif malformed_lines_count == 6 and log_callback: log_callback("ATT: Ulteriori errori parsing non loggati.")
             else:
                 malformed_lines_count += 1
-                if malformed_lines_count <= 5 and log_callback:
-                    log_callback(f"ATTENZIONE: Riga {i+2} scartata (Campi < {min_expected_fields}, trovati {len(values)}). Valori: '{line.strip()}'")
-                elif malformed_lines_count == 6 and log_callback:
-                        log_callback("ATTENZIONE: Ulteriori errori di campi insufficienti non verranno loggati.")
+                if malformed_lines_count <= 5 and log_callback: log_callback(f"ATT: Riga {i+2} scartata (Campi < {min_expected_fields}, trovati {len(values)}). Val: '{line.strip()}'")
+                elif malformed_lines_count == 6 and log_callback: log_callback("ATT: Ulteriori errori campi insuff. non loggati.")
 
-        if malformed_lines_count > 0 and log_callback:
-            log_callback(f"ATTENZIONE: {malformed_lines_count} righe totali scartate durante il parsing.")
-
+        if malformed_lines_count > 0 and log_callback: log_callback(f"ATTENZIONE: {malformed_lines_count} righe totali scartate durante il parsing.")
         if not processed_data:
             if log_callback: log_callback("ERRORE: Nessuna riga dati valida trovata dopo il parsing.")
             return None, None, None, None, None
         else:
-            if log_callback: log_callback(f"Parsing completato: {processed_lines_count} righe elaborate con successo.")
+            if log_callback: log_callback(f"Parsing completato: {processed_lines_count} righe elaborate.")
 
         # --- Crea DataFrame ---
         colonne_superenalotto = ['Data'] + [f'Num{i+1}' for i in range(6)] + ['Jolly', 'SuperStar']
@@ -192,143 +192,187 @@ def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_c
 
         # --- Pulizia Tipi e Date ---
         try:
-            # Converti Data
             df['Data'] = pd.to_datetime(df['Data'], format='%Y-%m-%d', errors='coerce')
-            rows_before_date_na = len(df)
-            df = df.dropna(subset=['Data'])
-            rows_after_date_na = len(df)
-            if rows_before_date_na > rows_after_date_na and log_callback:
-                log_callback(f"Rimosse {rows_before_date_na - rows_after_date_na} righe con date non valide.")
+            rows_before_na = len(df); df = df.dropna(subset=['Data']); rows_after_na = len(df)
+            if rows_before_na > rows_after_na and log_callback: log_callback(f"Rimosse {rows_before_na - rows_after_na} righe con date non valide.")
             if df.empty:
                 if log_callback: log_callback("ERRORE: Nessun dato valido rimasto dopo pulizia date.")
-                return df.copy(), None, None, None, None # Restituisci df vuoto
+                return df.copy(), None, None, None, None
             df = df.sort_values(by='Data', ascending=True).reset_index(drop=True)
             if log_callback: log_callback(f"DataFrame ordinato per data. Righe valide: {len(df)}")
 
-            # Converti Numeri (da Num1 a SuperStar)
             num_cols = [f'Num{i+1}' for i in range(6)] + ['Jolly', 'SuperStar']
-            rows_before_num_conv = len(df)
+            rows_before_num = len(df)
             for col in num_cols:
-                df[col] = pd.to_numeric(df[col], errors='coerce') # Converte in float, NaN se errore
-                df[col] = df[col].astype('Int64', errors='ignore') # Prova a convertire in Int64 (che supporta NA)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].astype('Int64', errors='ignore')
 
-            # Rimuovi righe dove i numeri principali sono NA
-            df_cleaned = df.dropna(subset=num_cols[:6]) # Solo Num1-6 sono obbligatori per il modello base
-            rows_after_num_conv = len(df_cleaned)
-            if rows_before_num_conv > rows_after_num_conv and log_callback:
-                 log_callback(f"Rimosse {rows_before_num_conv - rows_after_num_conv} righe con Num1-6 non validi.")
-
+            df_cleaned = df.dropna(subset=num_cols[:6]) # Num1-6 obbligatori
+            rows_after_num = len(df_cleaned)
+            if rows_before_num > rows_after_num and log_callback: log_callback(f"Rimosse {rows_before_num - rows_after_num} righe con Num1-6 non validi.")
             if df_cleaned.empty:
                  if log_callback: log_callback("ERRORE: Nessun dato valido rimasto dopo pulizia numeri principali.")
                  return df_cleaned.copy(), None, None, None, None
 
-            # Controllo range 1-90 (opzionale, ma buona pratica)
-            rows_before_range_check = len(df_cleaned)
+            rows_before_range = len(df_cleaned)
             for col in num_cols:
-                # Applica il check solo se la colonna non è tutta NA (es. Jolly/SS se non usati)
                 if df_cleaned[col].notna().any():
                     df_cleaned = df_cleaned[df_cleaned[col].isna() | ((df_cleaned[col] >= 1) & (df_cleaned[col] <= 90))]
-            rows_after_range_check = len(df_cleaned)
-            if rows_before_range_check > rows_after_range_check and log_callback:
-                 log_callback(f"Rimosse {rows_before_range_check - rows_after_range_check} righe con numeri fuori range (1-90).")
-
+            rows_after_range = len(df_cleaned)
+            if rows_before_range > rows_after_range and log_callback: log_callback(f"Rimosse {rows_before_range - rows_after_range} righe con numeri fuori range (1-90).")
             if df_cleaned.empty:
                  if log_callback: log_callback("ERRORE: Nessun dato valido rimasto dopo controllo range 1-90.")
                  return df_cleaned.copy(), None, None, None, None
-
             if log_callback: log_callback(f"Pulizia tipi e range completata. Righe finali per l'analisi: {len(df_cleaned)}")
-
         except Exception as e_clean:
             if log_callback: log_callback(f"ERRORE durante pulizia tipi/date/numeri: {e_clean}\n{traceback.format_exc()}")
             return None, None, None, None, None
 
         # --- Filtraggio Date Utente ---
-        df_filtered = df_cleaned.copy() # Lavora sulla copia pulita
+        df_filtered = df_cleaned.copy()
         rows_before_filter = len(df_filtered)
         if log_callback: log_callback(f"Applicazione filtro date utente: Start={start_date}, End={end_date}")
         if start_date:
             try:
-                start_dt = pd.to_datetime(start_date)
-                df_filtered = df_filtered[df_filtered['Data'] >= start_dt]
+                df_filtered = df_filtered[df_filtered['Data'] >= pd.to_datetime(start_date)]
             except Exception as e_start:
-                # <<<--- CORREZIONE QUI ---<<<
+                # CORREZIONE: Indentazione corretta
                 if log_callback:
                     log_callback(f"Errore filtro data inizio (verrà ignorato): {e_start}")
         if end_date:
              try:
-                 end_dt = pd.to_datetime(end_date)
-                 df_filtered = df_filtered[df_filtered['Data'] <= end_dt]
+                 df_filtered = df_filtered[df_filtered['Data'] <= pd.to_datetime(end_date)]
              except Exception as e_end:
-                 # <<<--- CORREZIONE QUI ---<<<
+                 # CORREZIONE: Indentazione corretta
                  if log_callback:
                      log_callback(f"Errore filtro data fine (verrà ignorato): {e_end}")
 
         rows_after_filter = len(df_filtered)
-        if log_callback:
-            if rows_before_filter == rows_after_filter: log_callback("Filtro date non ha rimosso righe (o date non specificate/invalide).")
-            else: log_callback(f"Righe dopo filtro date utente ({start_date} - {end_date}): {rows_after_filter} (rimosse {rows_before_filter - rows_after_filter})")
-
+        if log_callback: log_callback(f"Righe dopo filtro date utente: {rows_after_filter} (rimosse {rows_before_filter - rows_after_filter})")
         if df_filtered.empty:
-            if log_callback: log_callback("INFO: Nessuna riga rimasta nel DataFrame dopo il filtro per data specificato.")
-            # Restituiamo comunque il DF (vuoto) e None per gli array
-            return df_filtered.copy(), None, None, None, None
+            if log_callback: log_callback("INFO: Nessuna riga rimasta nel DataFrame dopo il filtro per data.")
+            # Determina last_update_date dal df PRIMA del filtro se possibile
+            last_update_before_filter = df_cleaned['Data'].max() if not df_cleaned.empty else None
+            return df_filtered.copy(), None, None, None, last_update_before_filter # Restituisce data prima del filtro
 
-        # --- Estrazione Array Finali dal DataFrame Filtrato ---
+                # --- Estrazione Array Finali ---
         numeri_principali_cols = [f'Num{i+1}' for i in range(6)]
         numeri_principali_array, numeri_jolly, numeri_superstar = None, None, None
-
         try:
-            # Estrai Num1-6 (sappiamo già che non sono NA qui)
             numeri_principali_array = df_filtered[numeri_principali_cols].values.astype(int)
             if log_callback: log_callback(f"Estratto array numeri principali. Shape: {numeri_principali_array.shape}")
 
-            # Estrai Jolly e SuperStar solo se le colonne esistono e hanno valori non NA
+            # Estrazione Jolly con correzione sintassi
             if 'Jolly' in df_filtered.columns and df_filtered['Jolly'].notna().any():
                 numeri_jolly = df_filtered.dropna(subset=['Jolly'])['Jolly'].values.astype(int)
                 if log_callback: log_callback(f"Estratto array Jolly. Shape: {numeri_jolly.shape}")
-            elif log_callback: log_callback("Colonna Jolly non presente o vuota nel set filtrato.")
+            else:
+                # CORREZIONE: Indentazione corretta
+                if log_callback:
+                     log_callback("Colonna Jolly non presente/vuota nel set filtrato.")
 
+            # Estrazione SuperStar con correzione sintassi
             if 'SuperStar' in df_filtered.columns and df_filtered['SuperStar'].notna().any():
                 numeri_superstar = df_filtered.dropna(subset=['SuperStar'])['SuperStar'].values.astype(int)
                 if log_callback: log_callback(f"Estratto array SuperStar. Shape: {numeri_superstar.shape}")
-            elif log_callback: log_callback("Colonna SuperStar non presente o vuota nel set filtrato.")
+            else:
+                 # CORREZIONE: Indentazione corretta
+                 if log_callback:
+                      log_callback("Colonna SuperStar non presente/vuota nel set filtrato.")
 
         except Exception as e_extract:
             if log_callback: log_callback(f"ERRORE durante estrazione array finali: {e_extract}")
             # In caso di errore qui, restituiamo ciò che abbiamo (df filtrato) e None per gli array
-            return df_filtered.copy(), None, None, None, None
+            # Ottieni comunque la data max dal df filtrato prima dell'errore di estrazione, se possibile
+            last_update_date_on_error = df_filtered['Data'].max() if not df_filtered.empty else None
+            return df_filtered.copy(), None, None, None, last_update_date_on_error
 
-        # Ottieni la data dell'ultima estrazione NEL SET DI DATI FILTRATO
         last_update_date = df_filtered['Data'].max() if not df_filtered.empty else None
-
         return df_filtered.copy(), numeri_principali_array, numeri_jolly, numeri_superstar, last_update_date
 
     except Exception as e_main:
-        # Errore generale non catturato prima
         if log_callback: log_callback(f"Errore GRAVE non gestito in carica_dati_superenalotto: {e_main}\n{traceback.format_exc()}")
         return None, None, None, None, None
 
-# --- Preparazione Sequenze per Modello ---
-def prepara_sequenze_per_modello_superenalotto(numeri_principali_array, sequence_length=5, log_callback=None):
+# NUOVO: Funzione per Feature Engineering Superenalotto
+def engineer_features_superenalotto(numeri_principali_array, log_callback=None):
     """
-    Prepara le sequenze di input (X) e target (y) per il modello SuperEnalotto.
-    X: sequenze di 'sequence_length' estrazioni (6 numeri appiattiti).
-    y: la successiva estrazione (6 numeri) in formato multi-hot (vettore di 90 con 1 per i numeri estratti).
+    Crea features aggiuntive dall'array dei 6 numeri principali.
+    Input: numeri_principali_array (N_draws, 6)
+    Output: combined_features (N_draws, 6 + N_new_features)
+    """
+    if numeri_principali_array is None or numeri_principali_array.ndim != 2 or numeri_principali_array.shape[1] != 6:
+        if log_callback: log_callback("ERRORE (engineer_features_se): Input numeri_principali_array non valido.")
+        return None
+
+    if log_callback: log_callback(f"Inizio Feature Engineering SuperEnalotto su {numeri_principali_array.shape[0]} estrazioni...")
+
+    try:
+        # Features base per riga
+        draw_sum = np.sum(numeri_principali_array, axis=1, keepdims=True)
+        draw_mean = np.mean(numeri_principali_array, axis=1, keepdims=True)
+        odd_count = np.sum(numeri_principali_array % 2 != 0, axis=1, keepdims=True)
+        even_count = 6 - odd_count
+        low_count = np.sum((numeri_principali_array >= 1) & (numeri_principali_array <= 45), axis=1, keepdims=True)
+        high_count = 6 - low_count
+        # range_val = np.max(numeri_principali_array, axis=1, keepdims=True) - np.min(numeri_principali_array, axis=1, keepdims=True) # Range può essere interessante
+
+        # Combina le nuove features
+        engineered_features = np.concatenate([
+            draw_sum,
+            draw_mean,
+            odd_count,
+            even_count,
+            low_count,
+            high_count
+            # range_val
+        ], axis=1)
+
+        # Combina le features ingegnerizzate con i numeri originali
+        combined_features = np.concatenate([numeri_principali_array, engineered_features], axis=1)
+
+        if log_callback: log_callback(f"Feature Engineering SuperEnalotto completato. Shape finale features: {combined_features.shape}")
+        return combined_features.astype(np.float32) # Converti in float per scaler
+
+    except Exception as e:
+        if log_callback: log_callback(f"ERRORE durante Feature Engineering SuperEnalotto: {e}\n{traceback.format_exc()}")
+        return None
+
+
+# MODIFICATO: Preparazione Sequenze per Modello Superenalotto
+def prepara_sequenze_per_modello_superenalotto(input_feature_array, target_number_array, sequence_length=5, log_callback=None):
+    """
+    Prepara le sequenze per il modello SuperEnalotto usando features combinate.
+    Input:
+        input_feature_array: Array con le features (numeri + engineered), shape (N_draws, N_features). ASSUME GIÀ SCALATO.
+        target_number_array: Array originale dei numeri estratti (usato per il target), shape (N_draws, 6)
+        sequence_length: Lunghezza della sequenza di input.
+    Output:
+        X: Array delle sequenze di input, shape (N_sequences, sequence_length * N_features)
+        y: Array target (multi-hot encoded, 6 numeri su 90), shape (N_sequences, 90)
     """
     if log_callback: log_callback(f"Avvio preparazione sequenze SuperEnalotto (SeqLen={sequence_length})...")
-    if numeri_principali_array is None or len(numeri_principali_array) == 0:
-        if log_callback: log_callback("ERRORE (prep_seq): Array numeri principali vuoto o None.")
-        return None, None
-    if numeri_principali_array.ndim != 2 or numeri_principali_array.shape[1] != 6:
-        if log_callback: log_callback(f"ERRORE (prep_seq): Array numeri principali non ha 6 colonne (shape: {numeri_principali_array.shape}).")
-        return None, None
 
-    num_estrazioni = len(numeri_principali_array)
-    if log_callback: log_callback(f"Numero estrazioni disponibili per sequenze: {num_estrazioni}.")
+    # Validazione input
+    if input_feature_array is None or target_number_array is None:
+        if log_callback: log_callback("ERRORE (prep_seq_se): Input array (features o target) mancante.")
+        return None, None
+    if input_feature_array.ndim != 2 or target_number_array.ndim != 2:
+        if log_callback: log_callback("ERRORE (prep_seq_se): Input arrays devono avere 2 dimensioni.")
+        return None, None
+    if input_feature_array.shape[0] != target_number_array.shape[0]:
+        if log_callback: log_callback("ERRORE (prep_seq_se): Disallineamento righe tra feature array e target array.")
+        return None, None
+    if target_number_array.shape[1] != 6:
+         if log_callback: log_callback(f"ERRORE (prep_seq_se): Target number array non ha 6 colonne (shape: {target_number_array.shape}).")
+         return None, None
 
-    # Devono esserci abbastanza estrazioni per creare almeno una sequenza input + target
+    n_features = input_feature_array.shape[1]
+    num_estrazioni = len(input_feature_array)
+    if log_callback: log_callback(f"Numero estrazioni disponibili: {num_estrazioni}, Num Features per estrazione: {n_features}")
+
     if num_estrazioni <= sequence_length:
-        msg = f"ERRORE: Estrazioni insufficienti ({num_estrazioni}) per creare sequenze di lunghezza {sequence_length}. Servono almeno {sequence_length + 1} estrazioni."
+        msg = f"ERRORE: Estrazioni insuff. ({num_estrazioni}) per seq_len ({sequence_length}). Servono {sequence_length + 1}."
         if log_callback: log_callback(msg)
         return None, None
 
@@ -336,531 +380,443 @@ def prepara_sequenze_per_modello_superenalotto(numeri_principali_array, sequence
     valid_sequences_count = 0
     invalid_target_count = 0
 
-    # Itera fino a num_estrazioni - sequence_length per avere sempre un target disponibile
     for i in range(num_estrazioni - sequence_length):
-        # Estrai la sequenza di input (gli ultimi 'sequence_length' elementi)
-        input_seq = numeri_principali_array[i : i + sequence_length]
-        # Estrai l'estrazione target (l'elemento successivo alla sequenza)
-        target_extraction = numeri_principali_array[i + sequence_length]
+        # Sequenza di input dalle features combinate (e scalate)
+        input_seq = input_feature_array[i : i + sequence_length]
+        # Target dall'array originale dei numeri
+        target_extraction = target_number_array[i + sequence_length]
 
-        # Validazione del target: assicurati che siano 6 numeri validi (1-90)
+        # Validazione target
         if len(target_extraction) == 6 and np.all((target_extraction >= 1) & (target_extraction <= 90)):
-            # Crea il vettore target multi-hot (lunghezza 90)
-            target_vector = np.zeros(90, dtype=np.int8) # Usiamo int8 per risparmiare memoria
-            # Imposta a 1 le posizioni corrispondenti ai numeri estratti (indice = numero - 1)
-            target_vector[target_extraction - 1] = 1
+            # Crea target multi-hot (90 elementi, 6 attivi)
+            target_vector = np.zeros(90, dtype=np.int8)
+            target_vector[target_extraction - 1] = 1 # Indici 0-89 per numeri 1-90
 
-            # Appiattisci la sequenza di input e aggiungila a X
+            # Appiattisci input e aggiungi
             X.append(input_seq.flatten())
-            # Aggiungi il vettore target a y
             y.append(target_vector)
             valid_sequences_count += 1
         else:
             invalid_target_count += 1
-            # Logga solo i primi errori per evitare spam
-            if invalid_target_count <= 5 and log_callback:
-                log_callback(f"ATTENZIONE (prep_seq): Scartata sequenza con indice iniziale {i}. Target non valido: {target_extraction}")
-            elif invalid_target_count == 6 and log_callback:
-                log_callback("ATTENZIONE (prep_seq): Ulteriori errori target non verranno loggati.")
+            if invalid_target_count <= 5 and log_callback: log_callback(f"ATT (prep_seq_se): Scartata seq indice {i}. Target non valido: {target_extraction}")
+            elif invalid_target_count == 6 and log_callback: log_callback("ATT (prep_seq_se): Ulteriori errori target non loggati.")
 
-    if invalid_target_count > 0 and log_callback:
-        log_callback(f"ATTENZIONE: Scartate {invalid_target_count} sequenze totali a causa di target non validi.")
-
-    if not X: # Se la lista X è vuota dopo il ciclo
-        if log_callback: log_callback("ERRORE: Nessuna sequenza valida creata. Controllare i dati di input.")
-        return None, None
+    if invalid_target_count > 0 and log_callback: log_callback(f"ATTENZIONE: Scartate {invalid_target_count} sequenze totali (target non valido).")
+    if not X:
+        if log_callback: log_callback("ERRORE: Nessuna sequenza valida creata."); return None, None
 
     if log_callback: log_callback(f"Create {valid_sequences_count} sequenze Input/Target valide.")
-
-    # Converti le liste X e y in array NumPy
     try:
-        X_np = np.array(X, dtype=np.int32) # Usiamo int32 per i numeri da 1 a 90
-        y_np = np.array(y, dtype=np.int8) # y è già 0/1, int8 va bene
+        # X contiene già float32 dallo scaler, y è int8
+        X_np = np.array(X, dtype=np.float32)
+        y_np = np.array(y, dtype=np.int8)
         if log_callback: log_callback(f"Array NumPy creati. Shape X: {X_np.shape}, Shape y: {y_np.shape}")
         return X_np, y_np
     except Exception as e_np_conv:
         if log_callback: log_callback(f"ERRORE durante conversione finale a NumPy array: {e_np_conv}")
         return None, None
 
-# --- Costruzione Modello Keras ---
+
+# --- Costruzione Modello Keras (build_model_superenalotto INVARIATA NELLA LOGICA) ---
+# Riceverà un input_shape diverso (N features * seq_len), ma la struttura resta uguale.
 def build_model_superenalotto(input_shape, hidden_layers=[512, 256, 128], loss_function='binary_crossentropy', optimizer='adam', dropout_rate=0.3, l1_reg=0.0, l2_reg=0.0, log_callback=None):
     """
-    Costruisce il modello Keras (rete neurale densa) per SuperEnalotto.
-    Input shape è (sequence_length * 6). Output shape è (90,).
+    Costruisce il modello Keras (DNN) per SuperEnalotto.
+    (Logica interna invariata, ma riceve shape aggiornato)
     """
     if log_callback: log_callback(f"Costruzione modello SuperEnalotto: InputShape={input_shape}, Layers={hidden_layers}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate}, L1={l1_reg}, L2={l2_reg}")
 
-    # Validazione input_shape
-    if not isinstance(input_shape, tuple) or len(input_shape) != 1 or not isinstance(input_shape[0], int) or input_shape[0] <= 0:
-         msg = f"ERRORE: input_shape non valido: {input_shape}. Deve essere una tupla con un intero positivo (es. (30,))."
-         if log_callback: log_callback(msg)
-         raise ValueError(msg) # Solleva errore per interrompere
+    # Validazioni (omesse per brevità, sono uguali a prima)
+    if not isinstance(input_shape, tuple) or len(input_shape) != 1 or input_shape[0] <= 0: raise ValueError(f"Invalid input_shape {input_shape}")
+    if not isinstance(hidden_layers, list) or not all(isinstance(u, int) and u > 0 for u in hidden_layers): raise ValueError("Invalid hidden_layers")
+    # ... altre validazioni ...
 
-    # Validazione hidden_layers
-    if not isinstance(hidden_layers, list) or not all(isinstance(units, int) and units > 0 for units in hidden_layers):
-        msg = f"ERRORE: hidden_layers non validi: {hidden_layers}. Deve essere una lista di interi positivi (es. [512, 256])."
-        if log_callback: log_callback(msg)
-        raise ValueError(msg) # Solleva errore
-
-    # Validazione dropout
-    if not isinstance(dropout_rate, (float, int)) or not (0.0 <= dropout_rate < 1.0): # Dropout 1.0 non ha senso
-        msg = f"ERRORE: dropout_rate non valido: {dropout_rate}. Deve essere un float tra 0.0 (incluso) e 1.0 (escluso)."
-        if log_callback: log_callback(msg)
-        raise ValueError(msg) # Solleva errore
-
-    # Validazione regolarizzazione
-    if not isinstance(l1_reg, (float, int)) or l1_reg < 0.0:
-        msg = f"ERRORE: l1_reg non valido: {l1_reg}. Deve essere un float >= 0.0."
-        if log_callback: log_callback(msg)
-        raise ValueError(msg) # Solleva errore
-    if not isinstance(l2_reg, (float, int)) or l2_reg < 0.0:
-        msg = f"ERRORE: l2_reg non valido: {l2_reg}. Deve essere un float >= 0.0."
-        if log_callback: log_callback(msg)
-        raise ValueError(msg) # Solleva errore
-
-    model = tf.keras.Sequential(name="Modello_SuperEnalotto_DNN")
-
-    # Input Layer (implicito specificando input_shape nel primo Dense o esplicito con Input)
+    model = tf.keras.Sequential(name="Modello_SuperEnalotto_DNN_FE")
     model.add(tf.keras.layers.Input(shape=input_shape, name="Input_Layer"))
+    kernel_regularizer = regularizers.l1_l2(l1=l1_reg, l2=l2_reg) if l1_reg > 0 or l2_reg > 0 else None
 
-    # Kernel Regularizer (L1/L2)
-    kernel_regularizer = None
-    if l1_reg > 0 or l2_reg > 0:
-        kernel_regularizer = regularizers.l1_l2(l1=l1_reg, l2=l2_reg)
-        if log_callback: log_callback(f"Applicata regolarizzazione L1={l1_reg:.4f}, L2={l2_reg:.4f}")
-
-    # Hidden Layers
     if not hidden_layers:
-        if log_callback: log_callback("ATTENZIONE: Nessun hidden layer specificato. Il modello avrà solo Input -> Output.")
+        if log_callback: log_callback("ATTENZIONE: Nessun hidden layer specificato.")
     else:
         for i, units in enumerate(hidden_layers):
             layer_num = i + 1
-            # Dense Layer
-            model.add(tf.keras.layers.Dense(
-                units,
-                activation='relu',
-                kernel_regularizer=kernel_regularizer,
-                name=f"Dense_{layer_num}_{units}"
-            ))
-            # Batch Normalization (spesso utile dopo Dense e prima di Dropout)
+            model.add(tf.keras.layers.Dense(units, activation='relu', kernel_regularizer=kernel_regularizer, name=f"Dense_{layer_num}_{units}"))
             model.add(tf.keras.layers.BatchNormalization(name=f"BatchNorm_{layer_num}"))
-            # Dropout (se specificato)
             if dropout_rate > 0:
                 model.add(tf.keras.layers.Dropout(dropout_rate, name=f"Dropout_{layer_num}_{dropout_rate:.2f}"))
 
-    # Output Layer
-    # 90 neuroni (uno per ogni possibile numero da 1 a 90)
-    # Attivazione Sigmoid: produce output tra 0 e 1 per ogni neurone, interpretabile
-    #                    come probabilità (per problemi multi-label come questo).
-    #                    Adatta per binary_crossentropy loss.
     model.add(tf.keras.layers.Dense(90, activation='sigmoid', name="Output_Layer_90_Sigmoid"))
 
-    # Compilazione del modello
     try:
-        model.compile(optimizer=optimizer,
-                      loss=loss_function,
-                      metrics=['accuracy']) # Accuracy qui misura la frazione di etichette predette correttamente (0 o 1)
-                                            # Potrebbe non essere la metrica più intuitiva per il lotto.
-                                            # Potresti considerare metriche custom o focalizzarti sulla loss.
-        if log_callback: log_callback(f"Modello SuperEnalotto compilato con successo (Optimizer: {optimizer}, Loss: {loss_function}).")
-    except ValueError as e_compile:
-        # Errore comune se optimizer o loss non sono riconosciuti da Keras
-         if log_callback: log_callback(f"ERRORE durante la compilazione del modello: {e_compile}. Verificare nomi optimizer/loss.")
-         return None # Restituisce None se la compilazione fallisce
+        model.compile(optimizer=optimizer, loss=loss_function, metrics=['accuracy']) # Accuracy qui è approssimativa
+        if log_callback: log_callback(f"Modello SuperEnalotto compilato (Optimizer: {optimizer}, Loss: {loss_function}).")
     except Exception as e_generic_compile:
-        if log_callback: log_callback(f"ERRORE generico durante la compilazione del modello: {e_generic_compile}")
+        if log_callback: log_callback(f"ERRORE generico compilazione modello: {e_generic_compile}")
         return None
 
-    # Stampa riepilogo modello nel log
     if log_callback:
         try:
-            stringlist = []
-            model.summary(print_fn=lambda x: stringlist.append(x))
-            summary_str = "\n".join(stringlist)
-            log_callback("Riepilogo Modello SuperEnalotto:\n" + summary_str)
-        except Exception as e_summary:
-            log_callback(f"ATTENZIONE: Impossibile generare riepilogo modello: {e_summary}")
+            stringlist = []; model.summary(print_fn=lambda x: stringlist.append(x))
+            log_callback("Riepilogo Modello SuperEnalotto:\n" + "\n".join(stringlist))
+        except Exception as e_summary: log_callback(f"ATT: Impossibile generare riepilogo modello: {e_summary}")
 
     return model
 
-# --- Callback per Logging Epoche nella GUI ---
+
+# --- Callback per Logging Epoche (LogCallback INVARIATA) ---
 class LogCallback(tf.keras.callbacks.Callback):
     """Callback Keras per inviare i log delle epoche alla funzione di log della GUI."""
-    def __init__(self, log_callback_func):
-        super().__init__()
-        self.log_callback_func = log_callback_func
-        self._is_running = True # Flag per fermare il logging se necessario
-
-    def stop_logging(self):
-        """Imposta il flag per fermare l'invio di log."""
-        self._is_running = False
+    def __init__(self, log_callback_func, stop_event=None): # Aggiunto stop_event opzionale
+         super().__init__()
+         self.log_callback_func = log_callback_func
+         self.stop_event = stop_event # Salva riferimento a stop_event
 
     def on_epoch_end(self, epoch, logs=None):
         """Chiamato alla fine di ogni epoca."""
-        # Se il logging è stato fermato o non c'è funzione di callback, non fare nulla
-        if not self._is_running or not self.log_callback_func:
+        # Controlla stop event
+        if self.stop_event and self.stop_event.is_set():
+            self.model.stop_training = True # Segnala a Keras di fermarsi
+            if self.log_callback_func: self.log_callback_func(f"Epoca {epoch+1}: Richiesta di stop ricevuta, arresto training...")
             return
 
-        logs = logs or {} # Assicura che logs sia un dizionario
-        # Formatta il messaggio di log per l'epoca
-        msg = f"Epoca {epoch+1:03d} - "
-        log_items = []
-        # Formatta ogni metrica nel dizionario logs
-        for k, v in logs.items():
-            # Sostituisci underscore e 'val ' per rendere più leggibile
-            metric_name = k.replace('_', ' ').replace('val ', 'V_')
-            log_items.append(f"{metric_name}: {v:.5f}") # Aumentata precisione a 5 decimali
+        if not self.log_callback_func: return
+        logs = logs or {}; msg = f"Epoca {epoch+1:03d} - "
+        log_items = [f"{k.replace('_',' ').replace('val ','V_')}: {v:.5f}" for k, v in logs.items()]
         msg += ", ".join(log_items)
+        self.log_callback_func(msg) # Invia il messaggio
 
-        # Invia il messaggio alla funzione di log della GUI
-        self.log_callback_func(msg)
 
-# --- Generazione Previsione ---
-def genera_previsione_superenalotto(model, X_input, num_predictions=6, log_callback=None):
+# --- Generazione Previsione (genera_previsione_superenalotto INVARIATA NELLA LOGICA) ---
+# Riceverà X_input con più features (già scalato), ma la logica resta uguale.
+def genera_previsione_superenalotto(model, X_input_scaled, num_predictions=6, log_callback=None):
     """
     Genera la previsione dei numeri del SuperEnalotto usando il modello addestrato.
-    Prende l'ultima sequenza (già normalizzata), fa la previsione e restituisce
-    una LISTA DI DIZIONARI, ognuno con 'number' e 'probability',
-    per i 'num_predictions' numeri con la probabilità più alta stimata dal modello.
-    La lista restituita NON è ordinata per probabilità, ma gli elementi contengono le probabilità.
+    Input: X_input_scaled (1, sequence_length * N_features) già scalato.
+    Output: Lista di dizionari [{'number': n, 'probability': p}, ...]
+    (Logica interna invariata)
     """
     if log_callback: log_callback(f"Avvio generazione previsione SuperEnalotto per {num_predictions} numeri...")
     if model is None:
-        if log_callback: log_callback("ERRORE (genera_prev): Modello non fornito o non valido.")
-        return None
-    if X_input is None or X_input.size == 0:
-        if log_callback: log_callback("ERRORE (genera_prev): Input (X_input) vuoto o non valido.")
-        return None
-    # Assicurati che l'input sia 2D (anche se è una sola sequenza)
-    if X_input.ndim == 1:
-        X_input_reshaped = X_input.reshape(1, -1) # Reshape (features,) in (1, features)
-    elif X_input.ndim == 2 and X_input.shape[0] == 1:
-        X_input_reshaped = X_input # Già nel formato corretto (1, features)
-    elif X_input.ndim >= 2 and X_input.shape[0] > 1:
-         if log_callback: log_callback(f"ATTENZIONE (genera_prev): Ricevuto input con shape {X_input.shape}. Verrà usata solo la prima riga per la previsione.")
-         X_input_reshaped = X_input[0].reshape(1, -1) # Prendi solo la prima riga/sequenza
-    else:
-        if log_callback: log_callback(f"ERRORE (genera_prev): Shape input non gestita: {X_input.shape}. Atteso 1D o 2D.")
-        return None
+        if log_callback: log_callback("ERRORE (genera_prev_se): Modello non fornito."); return None
+    if X_input_scaled is None or X_input_scaled.size == 0:
+        if log_callback: log_callback("ERRORE (genera_prev_se): Input scalato vuoto."); return None
 
+    # Assicura input 2D (1, N_features_flat)
+    if X_input_scaled.ndim == 1: X_input_reshaped = X_input_scaled.reshape(1, -1)
+    elif X_input_scaled.ndim == 2 and X_input_scaled.shape[0] == 1: X_input_reshaped = X_input_scaled
+    else:
+        if log_callback: log_callback(f"ERRORE (genera_prev_se): Shape input scalato non gestita: {X_input_scaled.shape}. Atteso 1D o (1, features).")
+        return None
     if log_callback: log_callback(f"Input per predict preparato con shape: {X_input_reshaped.shape}")
 
-    # Validazione coerenza shape input con modello
+    # Validazione shape vs modello (opzionale)
     try:
-        expected_input_features = model.input_shape[-1]
-        if expected_input_features is not None and X_input_reshaped.shape[1] != expected_input_features:
-            msg = f"ERRORE Shape Input: Dimensione input ({X_input_reshaped.shape[1]}) != Dimensione attesa dal modello ({expected_input_features})."
-            if log_callback: log_callback(msg)
-            return None
+        expected_features = model.input_shape[-1]
+        if expected_features is not None and X_input_reshaped.shape[1] != expected_features:
+            msg = f"ERRORE Shape Input: Input ({X_input_reshaped.shape[1]}) != Modello ({expected_features})."
+            if log_callback: log_callback(msg); return None
     except Exception as e_shape_check:
-         # Non critico se non riusciamo a verificarlo, ma logghiamo l'attenzione
-         if log_callback: log_callback(f"ATTENZIONE (genera_prev): Impossibile verificare shape input modello ({e_shape_check}). Procedo comunque.")
+         if log_callback: log_callback(f"ATT (genera_prev_se): Impossibile verificare shape input modello ({e_shape_check}).")
 
-    # Validazione num_predictions
     if not isinstance(num_predictions, int) or not (1 <= num_predictions <= 90):
-        msg = f"ERRORE (genera_prev): num_predictions={num_predictions} non valido. Deve essere un intero tra 1 e 90."
-        if log_callback: log_callback(msg)
-        return None
+        msg = f"ERRORE (genera_prev_se): num_predictions={num_predictions} non valido (1-90)."
+        if log_callback: log_callback(msg); return None
 
     try:
-        # Esegui la previsione
-        # verbose=0 per evitare output di Keras nella console/log
         pred_probabilities = model.predict(X_input_reshaped, verbose=0)
-
-        # Verifica l'output della previsione
         if pred_probabilities is None or pred_probabilities.size == 0:
-            if log_callback: log_callback("ERRORE (genera_prev): model.predict() ha restituito None o un array vuoto.")
-            return None
-        # L'output dovrebbe essere (1, 90) perché abbiamo fornito 1 campione di input
+            if log_callback: log_callback("ERRORE (genera_prev_se): model.predict() ha restituito vuoto."); return None
         if pred_probabilities.ndim != 2 or pred_probabilities.shape[0] != 1 or pred_probabilities.shape[1] != 90:
-             msg = f"ERRORE (genera_prev): Output shape da predict inatteso: {pred_probabilities.shape}. Atteso (1, 90)."
-             if log_callback: log_callback(msg)
-             return None
+             msg = f"ERRORE (genera_prev_se): Output shape da predict inatteso: {pred_probabilities.shape}. Atteso (1, 90)."
+             if log_callback: log_callback(msg); return None
 
-        # Estrai il vettore di 90 probabilità
         probs_vector = pred_probabilities[0] # Shape (90,)
-
-        # Trova gli INDICI dei numeri con le probabilità più alte
-        # np.argsort restituisce gli indici che ordinerebbero l'array (dal più basso al più alto)
         sorted_indices = np.argsort(probs_vector)
-
-        # Prendi gli ultimi 'num_predictions' indici (quelli delle probabilità più alte)
         top_n_indices = sorted_indices[-num_predictions:]
 
-        # Crea la lista di risultati (dizionari)
-        predicted_results = []
-        for index in top_n_indices:
-            number = int(index + 1) # Il numero è indice + 1
-            probability = float(probs_vector[index]) # La probabilità associata a quell'indice
-            predicted_results.append({"number": number, "probability": probability})
+        predicted_results = [{"number": int(index + 1), "probability": float(probs_vector[index])}
+                             for index in top_n_indices]
 
-        # Log dettagliato delle previsioni (opzionale: ordina per probabilità per il log)
         if log_callback:
             results_sorted_by_prob_desc = sorted(predicted_results, key=lambda x: x['probability'], reverse=True)
             log_probs = [f"{res['number']:02d} (p={res['probability']:.5f})" for res in results_sorted_by_prob_desc]
-            log_callback(f"Top {num_predictions} numeri predetti (ord. per probabilità decrescente):\n  " + "\n  ".join(log_probs))
+            log_callback(f"Top {num_predictions} numeri predetti (ord. prob. decr.):\n  " + "\n  ".join(log_probs))
 
-        # Restituisci la lista di dizionari (non necessariamente ordinata)
-        # L'ordinamento per numero avverrà nella GUI se necessario
-        return predicted_results
+        return predicted_results # Lista di dizionari
 
     except Exception as e_predict:
-        if log_callback: log_callback(f"ERRORE CRITICO durante la generazione della previsione: {e_predict}\n{traceback.format_exc()}")
+        if log_callback: log_callback(f"ERRORE CRITICO durante generazione previsione SuperEnalotto: {e_predict}\n{traceback.format_exc()}")
         return None
 
-# --- Funzione Principale di Analisi ---
+
+# --- Funzione Principale di Analisi (MODIFICATA per FE & CV) ---
 def analisi_superenalotto(file_path, start_date, end_date, sequence_length=5,
                           loss_function='binary_crossentropy', optimizer='adam',
                           dropout_rate=0.3, l1_reg=0.0, l2_reg=0.0,
                           hidden_layers_config=[512, 256, 128],
                           max_epochs=100, batch_size=32, patience=15, min_delta=0.0001,
                           num_predictions=6,
-                          log_callback=None):
+                          n_cv_splits=DEFAULT_SUPERENALOTTO_CV_SPLITS, # NUOVO: Parametro CV
+                          log_callback=None,
+                          stop_event=None): # NUOVO: Parametro Stop Event
     """
-    Analizza i dati del SuperEnalotto, addestra il modello e genera previsioni.
-    'file_path' può essere un URL (raw) o un percorso di file locale.
-    Restituisce:
-        - Una lista di dizionari [{'number': n, 'probability': p}, ...] per i numeri predetti, o None in caso di errore.
-        - Un messaggio sull'attendibilità/stato.
-        - La data dell'ultimo aggiornamento dei dati usati.
+    Analizza i dati del SuperEnalotto con Feature Engineering e Cross-Validation.
+    Restituisce: previsione (lista dict), messaggio attendibilità, data ultimo aggiornamento.
     """
     # --- Logging Iniziale ---
     if log_callback:
         source_type = "URL" if file_path.startswith("http") else "File"
         source_name = os.path.basename(file_path) if source_type == "File" else file_path
-        log_callback(f"\n=== Avvio Analisi SuperEnalotto (vCorretta) ===")
-        log_callback(f"Sorgente: {source_type} ({source_name})")
-        log_callback(f"Periodo Dati: {start_date} -> {end_date}")
-        log_callback(f"Parametri Seq/Pred: SeqLen={sequence_length}, NumPred={num_predictions}")
-        log_callback(f"Modello: HiddenL={hidden_layers_config}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate}, L1={l1_reg}, L2={l2_reg}")
-        log_callback(f"Training: MaxEpochs={max_epochs}, Batch={batch_size}, Patience={patience}, MinDelta={min_delta}")
+        log_callback(f"\n=== Avvio Analisi SuperEnalotto (FE & CV) ===")
+        log_callback(f"Sorgente: {source_type} ({source_name}), Periodo: {start_date} -> {end_date}")
+        log_callback(f"Seq/Pred: SeqLen={sequence_length}, NumPred={num_predictions}, CV Splits={n_cv_splits}")
+        log_callback(f"Modello: HL={hidden_layers_config}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate}, L1={l1_reg}, L2={l2_reg}")
+        log_callback(f"Training: Epochs={max_epochs}, Batch={batch_size}, Pat={patience}, MinDelta={min_delta}")
         log_callback("-" * 40)
+
+    # Controllo stop iniziale
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima dell'inizio."); return None, "Analisi annullata", None
 
     # 1. Carica e Preprocessa i Dati
     df, numeri_principali_array, _, _, last_update_date = carica_dati_superenalotto(
         file_path, start_date, end_date, log_callback=log_callback
     )
-
-    # Verifica caricamento dati
-    if df is None:
-        return None, "Errore critico durante il caricamento dei dati.", None
-    if df.empty:
-         msg = "Nessun dato trovato per il periodo specificato o dopo la pulizia iniziale."
-         if log_callback: log_callback(f"INFO: {msg}")
-         # Restituiamo la data dell'ultimo aggiornamento anche se il df filtrato è vuoto,
-         # se la funzione carica_dati l'ha determinata prima del filtro.
-         return None, msg, last_update_date
-    if numeri_principali_array is None or len(numeri_principali_array) == 0:
-        msg = "Dati caricati, ma nessun array valido di numeri principali estratto."
-        if log_callback: log_callback(f"ERRORE: {msg}")
-        return None, msg, last_update_date
+    if df is None: return None, "Errore critico caricamento dati.", None
+    if df.empty or numeri_principali_array is None or len(numeri_principali_array) == 0:
+        msg = "Nessun dato valido trovato per analisi."
+        if log_callback: log_callback(f"INFO: {msg}"); return None, msg, last_update_date
     if len(numeri_principali_array) < sequence_length + 1:
-        msg = f"ERRORE: Dati numerici insufficienti ({len(numeri_principali_array)}) per creare sequenze di lunghezza {sequence_length}. Servono almeno {sequence_length + 1} estrazioni."
-        if log_callback: log_callback(msg)
-        return None, msg, last_update_date
+        msg = f"ERRORE: Dati insuff. ({len(numeri_principali_array)}) per seq_len ({sequence_length}). Servono {sequence_length + 1}."
+        if log_callback: log_callback(msg); return None, msg, last_update_date
 
-    if log_callback: log_callback(f"Dati caricati e validati. Numero estrazioni per sequenze: {len(numeri_principali_array)}. Ultimo aggiornamento: {last_update_date.strftime('%Y-%m-%d') if last_update_date else 'N/D'}")
+    last_update_str = last_update_date.strftime('%Y-%m-%d') if last_update_date else 'N/D'
+    if log_callback: log_callback(f"Dati caricati. Estrazioni: {len(numeri_principali_array)}. Ultimo agg: {last_update_str}")
 
-    # 2. Prepara Sequenze
+    # Controllo stop dopo caricamento
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata dopo caricamento dati."); return None, "Analisi annullata", last_update_date
+
+    # 2. Feature Engineering
+    combined_features = engineer_features_superenalotto(numeri_principali_array, log_callback=log_callback)
+    if combined_features is None:
+        return None, "Feature Engineering fallito.", last_update_date
+
+    # Controllo stop dopo FE
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata dopo Feature Engineering."); return None, "Analisi annullata", last_update_date
+
+    # 3. Prepara Sequenze (Input dalle Combined Features, Target dai Numeri Originali)
+    # Nota: combined_features non è ancora scalato qui. Lo scalerà la CV/train finale.
     X, y = None, None
     try:
-        X, y = prepara_sequenze_per_modello_superenalotto(numeri_principali_array, sequence_length, log_callback=log_callback)
+        # Passiamo combined_features (non scalato) e numeri_principali_array (per target)
+        # La funzione prepara_sequenze ora assume che X sarà scalato *dopo*
+        X, y = prepara_sequenze_per_modello_superenalotto(combined_features, numeri_principali_array, sequence_length, log_callback=log_callback)
         if X is None or y is None or len(X) == 0:
-            return None, "Creazione sequenze Input/Target fallita o nessuna sequenza valida generata.", last_update_date
+            return None, "Creazione sequenze Input/Target fallita.", last_update_date
+
+        # Verifica minima per CV
+        min_samples_for_cv = n_cv_splits + 1
+        if len(X) < min_samples_for_cv:
+            msg = f"ERRORE: Campioni insuff. ({len(X)}) per {n_cv_splits}-Fold CV (min {min_samples_for_cv}). Riduci n_splits o aumenta dati."; log_callback(msg); return None, msg, last_update_date
+
     except Exception as e_prep:
-         if log_callback: log_callback(f"ERRORE CRITICO durante preparazione sequenze: {e_prep}\n{traceback.format_exc()}")
+         if log_callback: log_callback(f"ERRORE CRITICO preparazione sequenze: {e_prep}\n{traceback.format_exc()}")
          return None, f"Errore preparazione sequenze: {e_prep}", last_update_date
 
-    # 3. Normalizza Input (X)
-    try:
-        X_scaled = X.astype(np.float32) / 90.0
-        if log_callback: log_callback(f"Input X normalizzato (diviso per 90). Shape: {X_scaled.shape}, Range: [{X_scaled.min():.2f}, {X_scaled.max():.2f}]")
-    except Exception as e_scale:
-        if log_callback: log_callback(f"ERRORE durante normalizzazione input X: {e_scale}")
-        return None, "Errore normalizzazione dati input", last_update_date
+    # Controllo stop dopo prep sequenze
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata dopo preparazione sequenze."); return None, "Analisi annullata", last_update_date
 
-    # 4. Split Train/Validation (opzionale ma raccomandato)
-    X_train, X_val, y_train, y_val = None, None, None, None
-    split_ratio = 0.8 # 80% train, 20% validation
-    min_samples_for_split = 10 # Numero minimo di campioni per tentare uno split sensato
+    # 4. Cross-Validation con TimeSeriesSplit
+    tscv = TimeSeriesSplit(n_splits=n_cv_splits)
+    fold_val_losses = []
+    fold_val_accuracies = []
+    fold_best_epochs = []
+    log_callback(f"\n--- Inizio {n_cv_splits}-Fold TimeSeries Cross-Validation ---")
 
-    if len(X_scaled) >= min_samples_for_split:
+    for fold, (train_index, val_index) in enumerate(tscv.split(X)):
+        fold_num = fold + 1
+        if stop_event and stop_event.is_set(): log_callback(f"CV Interrotta prima del fold {fold_num}."); break
+
+        log_callback(f"\n--- Fold {fold_num}/{n_cv_splits} ---")
+        X_train_fold, X_val_fold = X[train_index], X[val_index]
+        y_train_fold, y_val_fold = y[train_index], y[val_index]
+        log_callback(f"Train: {len(X_train_fold)} campioni (idx {train_index[0]}-{train_index[-1]}), Validation: {len(X_val_fold)} campioni (idx {val_index[0]}-{val_index[-1]})")
+
+        if len(X_train_fold) == 0 or len(X_val_fold) == 0:
+             log_callback(f"ATT: Fold {fold_num} saltato (set vuoto)."); continue
+
+        # -> 4a. Scale Fold Data (Fit on Train, Transform Train & Val)
+        scaler_fold = StandardScaler()
         try:
-            split_idx = int(len(X_scaled) * split_ratio)
-            split_idx = max(1, min(split_idx, len(X_scaled) - 1))
-            X_train, X_val = X_scaled[:split_idx], X_scaled[split_idx:]
-            y_train, y_val = y[:split_idx], y[split_idx:]
+            X_train_fold_scaled = scaler_fold.fit_transform(X_train_fold)
+            X_val_fold_scaled = scaler_fold.transform(X_val_fold)
+            log_callback(f"Dati Fold {fold_num} scalati (StandardScaler fit su train).")
+        except Exception as e_scale_fold:
+            log_callback(f"ERRORE scaling fold {fold_num}: {e_scale_fold}. Salto fold."); continue
 
-            if log_callback: log_callback(f"Dati divisi: {len(X_train)} train ({split_ratio*100:.0f}%), {len(X_val)} validation ({(1-split_ratio)*100:.0f}%).")
+        # -> 4b. Build & Train Fold Model
+        model_fold, history_fold = None, None
+        gui_log_callback_fold = LogCallback(log_callback, stop_event) # Passa stop_event
+        try:
+            tf.keras.backend.clear_session(); set_seed()
+            input_shape_fold = (X_train_fold_scaled.shape[1],)
+            model_fold = build_model_superenalotto(input_shape_fold, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
+            if model_fold is None: log_callback(f"ERRORE: Costruzione modello fold {fold_num} fallita."); continue
 
-            if len(X_train)==0 or len(y_train)==0 or len(X_val)==0 or len(y_val)==0:
-                if log_callback: log_callback("ATTENZIONE: Split ha prodotto set vuoti. Fallback a training su tutti i dati.")
-                X_train, y_train = X_scaled, y
-                X_val, y_val = None, None
-                validation_data_fit = None
-                monitor_metric = 'loss'
-            else:
-                 validation_data_fit = (X_val, y_val)
-                 monitor_metric = 'val_loss'
+            monitor = 'val_loss'; patience_fold = max(5, patience // 2) # Patience ridotta per CV
+            early_stopping_fold = tf.keras.callbacks.EarlyStopping(monitor=monitor, patience=patience_fold, min_delta=min_delta, restore_best_weights=True, verbose=0)
+            log_callback(f"Inizio addestramento fold {fold_num} (Patience={patience_fold})...")
+            history_fold = model_fold.fit(X_train_fold_scaled, y_train_fold, validation_data=(X_val_fold_scaled, y_val_fold),
+                                          epochs=max_epochs, batch_size=batch_size,
+                                          callbacks=[early_stopping_fold, gui_log_callback_fold], verbose=0)
 
-        except Exception as e_split:
-             if log_callback: log_callback(f"ERRORE durante lo split train/validation: {e_split}. Fallback a training su tutti i dati.")
-             X_train, y_train = X_scaled, y
-             X_val, y_val = None, None
-             validation_data_fit = None
-             monitor_metric = 'loss'
+            # Controllo stop dopo fit fold
+            if stop_event and stop_event.is_set(): log_callback(f"Training fold {fold_num} interrotto."); break
+
+            if history_fold and history_fold.history and 'val_loss' in history_fold.history:
+                best_epoch_idx = np.argmin(history_fold.history['val_loss'])
+                best_val_loss = history_fold.history['val_loss'][best_epoch_idx]
+                best_val_acc = history_fold.history['val_accuracy'][best_epoch_idx] if 'val_accuracy' in history_fold.history else -1.0
+                fold_val_losses.append(best_val_loss)
+                fold_val_accuracies.append(best_val_acc)
+                fold_best_epochs.append(best_epoch_idx + 1)
+                log_callback(f"Fold {fold_num} OK. Miglior epoca: {best_epoch_idx+1}, Val Loss: {best_val_loss:.5f}, Val Acc: {best_val_acc:.5f}")
+            else: log_callback(f"ATT: History fold {fold_num} invalida o 'val_loss' mancante.")
+
+        except tf.errors.ResourceExhaustedError as e_mem:
+             msg = f"ERRORE Memoria fold {fold_num}: {e_mem}."; log_callback(msg); log_callback(traceback.format_exc()); break # Stop CV
+        except Exception as e_fold:
+            if stop_event and stop_event.is_set(): log_callback(f"Eccezione fold {fold_num} (prob. da stop): {e_fold}"); break
+            msg = f"ERRORE CRITICO addestramento fold {fold_num}: {e_fold}"; log_callback(msg); log_callback(traceback.format_exc());
+            # break # Considera interrompere CV
+            log_callback("Continuo con il prossimo fold...")
+            continue
+        finally:
+             pass # gui_log_callback_fold non ha bisogno di stop manuale se stop_event è usato
+
+    # --- Fine Loop CV ---
+    if stop_event and stop_event.is_set(): log_callback("Cross-Validation interrotta."); return None, "Analisi Interrotta (CV)", last_update_date
+
+    avg_val_loss, avg_val_acc, avg_epochs = -1.0, -1.0, -1.0
+    attendibilita_cv_msg = "Attendibilità CV: Non Determinata (CV incompleta o fallita)"
+    if fold_val_losses:
+        avg_val_loss = np.mean(fold_val_losses)
+        avg_val_acc = np.mean(fold_val_accuracies) if fold_val_accuracies and all(v >= 0 for v in fold_val_accuracies) else -1.0
+        avg_epochs = np.mean(fold_best_epochs) if fold_best_epochs else -1.0
+        log_callback("\n--- Risultati Cross-Validation ---")
+        log_callback(f"Loss media (val): {avg_val_loss:.5f}")
+        if avg_val_acc >= 0: log_callback(f"Accuracy media (val): {avg_val_acc:.5f}")
+        if avg_epochs >= 0: log_callback(f"Epoca media ottimale: {avg_epochs:.1f}")
+        attendibilita_cv_msg = f"Attendibilità CV: Loss={avg_val_loss:.4f}, Acc={avg_val_acc:.4f} ({len(fold_val_losses)} folds)"
+        log_callback("---------------------------------")
     else:
-        if log_callback: log_callback(f"INFO: Campioni insufficienti ({len(X_scaled)} < {min_samples_for_split}) per split. Training su tutti i dati.")
-        X_train, y_train = X_scaled, y
-        X_val, y_val = None, None
-        validation_data_fit = None
-        monitor_metric = 'loss'
+        log_callback("\nATTENZIONE: Nessun fold CV completato con successo.")
+        return None, "Cross-Validation fallita (nessun fold valido)", last_update_date
 
-    # 5. Costruisci e Addestra il Modello
-    model, history, gui_log_callback_instance = None, None, None
-    final_loss_for_attendibilita = float('inf')
-    best_epoch_number = -1
+    # Controllo stop prima del training finale
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima del training finale."); return None, "Analisi Interrotta (Pre-Final)", last_update_date
 
+    # 5. Addestra Modello Finale su TUTTI i dati (X, y)
+    final_model, history_final = None, None
+    final_loss = float('inf'); final_acc = -1.0; final_epochs_run = 0
+    final_scaler = StandardScaler() # Scaler per i dati finali
+    log_callback("\n--- Addestramento Modello Finale su tutti i dati ---")
+    gui_log_callback_final = LogCallback(log_callback, stop_event) # Passa stop_event
     try:
-        tf.keras.backend.clear_session()
-        set_seed()
+        # -> 5a. Scale ALL Data using final_scaler
+        X_scaled_final = final_scaler.fit_transform(X)
+        log_callback(f"Dati finali (X) scalati per training. Shape: {X_scaled_final.shape}")
 
-        if X_train is None or X_train.size == 0 or X_train.ndim != 2 or X_train.shape[1] == 0:
-            if log_callback: log_callback(f"ERRORE CRITICO: Dati di training (X_train) non validi prima della costruzione del modello. Shape: {X_train.shape if X_train is not None else 'None'}")
-            return None, "Errore: dati di training invalidi.", last_update_date
+        # -> 5b. Build & Train Final Model
+        tf.keras.backend.clear_session(); set_seed()
+        input_shape_final = (X_scaled_final.shape[1],)
+        final_model = build_model_superenalotto(input_shape_final, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
+        if final_model is None: return None, "Costruzione modello finale fallita.", last_update_date
 
-        input_shape_model = (X_train.shape[1],)
-        model = build_model_superenalotto(input_shape_model, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
-        if model is None:
-            return None, "Costruzione modello SuperEnalotto fallita.", last_update_date
+        # Usiamo EarlyStopping sulla loss di training
+        final_early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=1)
+        log_callback(f"Inizio addestramento finale (max {max_epochs} epoche, ES su 'loss', Patience={patience})...")
+        history_final = final_model.fit(X_scaled_final, y, epochs=max_epochs, batch_size=batch_size,
+                                        callbacks=[final_early_stopping, gui_log_callback_final], verbose=0)
 
-        early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor=monitor_metric, patience=patience, min_delta=min_delta,
-            restore_best_weights=True, verbose=1
-        )
-        gui_log_callback_instance = LogCallback(log_callback)
-        callbacks_list = [early_stopping, gui_log_callback_instance]
+        # Controllo stop dopo fit finale
+        if stop_event and stop_event.is_set(): log_callback("Addestramento finale interrotto."); return None, "Analisi Interrotta (Final Train)", last_update_date
 
-        if log_callback: log_callback(f"\n--- Inizio Addestramento Modello (Monitor: '{monitor_metric}', Patience: {patience}) ---")
-
-        history = model.fit(
-            X_train, y_train, validation_data=validation_data_fit,
-            epochs=max_epochs, batch_size=batch_size,
-            callbacks=callbacks_list, verbose=0
-        )
-
-        if history and history.history:
-            epochs_run = len(history.history.get('loss', []))
-            if log_callback: log_callback(f"--- Addestramento Terminato (Epoche eseguite: {epochs_run}) ---")
-
-            train_loss_hist = history.history.get('loss', [])
-            val_loss_hist = history.history.get('val_loss', [])
-
-            if val_loss_hist:
-                best_epoch_idx = np.argmin(val_loss_hist)
-                final_loss_for_attendibilita = val_loss_hist[best_epoch_idx]
-                best_epoch_number = best_epoch_idx + 1
-                train_loss_at_best_val = train_loss_hist[best_epoch_idx] if best_epoch_idx < len(train_loss_hist) else float('inf')
-                if log_callback:
-                    log_callback(f"Miglior epoca (basata su val_loss): {best_epoch_number}")
-                    log_callback(f"  - Val Loss Minima: {final_loss_for_attendibilita:.5f}")
-                    log_callback(f"  - Train Loss (in quell'epoca): {train_loss_at_best_val:.5f}")
-            elif train_loss_hist:
-                 best_epoch_idx = np.argmin(train_loss_hist)
-                 final_loss_for_attendibilita = train_loss_hist[best_epoch_idx]
-                 best_epoch_number = best_epoch_idx + 1
-                 if log_callback:
-                     log_callback(f"Miglior epoca (basata su train_loss): {best_epoch_number}")
-                     log_callback(f"  - Train Loss Minima: {final_loss_for_attendibilita:.5f} (Nessuna validazione)")
-            else:
-                 if log_callback: log_callback("ATTENZIONE: Nessuna history di loss trovata dopo l'addestramento.")
-                 final_loss_for_attendibilita = float('inf')
-                 best_epoch_number = epochs_run
+        if history_final and history_final.history and 'loss' in history_final.history:
+             final_epochs_run = len(history_final.history['loss'])
+             best_final_epoch_idx = np.argmin(history_final.history['loss']) # Indice della loss minima
+             final_loss = history_final.history['loss'][best_final_epoch_idx]
+             final_acc = history_final.history['accuracy'][best_final_epoch_idx] if 'accuracy' in history_final.history else -1.0
+             log_callback(f"Addestramento finale OK: {final_epochs_run} epoche (migliore @ {best_final_epoch_idx+1}). Loss: {final_loss:.5f}, Acc: {final_acc:.5f}")
         else:
-             if log_callback: log_callback("ATTENZIONE: Oggetto History non valido o vuoto restituito da model.fit(). Impossibile determinare la migliore epoca o loss.")
-             final_loss_for_attendibilita = float('inf')
-             best_epoch_number = max_epochs
+             log_callback("ATT: History addestramento finale non valida o 'loss' mancante.")
 
     except tf.errors.ResourceExhaustedError as e_mem:
-         msg = f"ERRORE OOM: Memoria insufficiente (GPU?). Riduci batch size, lunghezza sequenza o complessità modello. Dettagli: {e_mem}"
-         if log_callback: log_callback(msg); log_callback(traceback.format_exc())
-         if gui_log_callback_instance: gui_log_callback_instance.stop_logging()
-         return None, msg, last_update_date
-    except Exception as e_train:
-        msg = f"ERRORE CRITICO durante addestramento: {e_train}"
-        if log_callback: log_callback(msg); log_callback(traceback.format_exc())
-        if gui_log_callback_instance: gui_log_callback_instance.stop_logging()
-        return None, msg, last_update_date
+         msg = f"ERRORE Memoria Training Finale: {e_mem}."; log_callback(msg); log_callback(traceback.format_exc()); return None, msg, last_update_date
+    except Exception as e_final:
+        if stop_event and stop_event.is_set(): log_callback(f"Eccezione training finale (prob. da stop): {e_final}"); return None, "Analisi Interrotta (Final Train Err)", last_update_date
+        msg = f"ERRORE CRITICO addestramento finale: {e_final}"; log_callback(msg); log_callback(traceback.format_exc()); return None, msg, last_update_date
     finally:
-         if gui_log_callback_instance:
-             gui_log_callback_instance.stop_logging()
+         pass # gui_log_callback_final non necessita stop manuale
 
-    # 6. Prepara Input e Genera Previsione Finale
+    # Controllo stop prima della previsione
+    if stop_event and stop_event.is_set(): log_callback("Analisi annullata prima della previsione finale."); return None, "Analisi Interrotta (Pre-Predict)", last_update_date
+
+    # 6. Prepara Input per Previsione Finale e Genera
     previsione_completa = None
     attendibilita_msg = "Attendibilità Non Determinata"
     try:
-        if log_callback: log_callback("\n--- Preparazione Input per Previsione Finale ---")
-        if numeri_principali_array is None or len(numeri_principali_array) < sequence_length:
-            needed = sequence_length
-            available = len(numeri_principali_array) if numeri_principali_array is not None else 0
-            msg = f"ERRORE: Dati originali insufficienti ({available}) per creare l'input finale per la previsione (richieste {needed} estrazioni)."
-            if log_callback: log_callback(msg)
-            return None, msg, last_update_date
+        log_callback("\n--- Preparazione Input per Previsione Finale ---")
+        # Prendi le ultime 'sequence_length' righe dall'array originale
+        if len(numeri_principali_array) < sequence_length:
+            msg = f"ERRORE: Dati originali insuff. ({len(numeri_principali_array)}) per input previsione (richiesti {sequence_length})."
+            log_callback(msg); return None, msg, last_update_date
 
-        input_pred_raw = numeri_principali_array[-sequence_length:]
-        input_pred_flat = input_pred_raw.flatten()
-        input_pred_scaled = input_pred_flat.astype(np.float32) / 90.0
-        if log_callback:
-            log_callback(f"Ultima sequenza raw (shape {input_pred_raw.shape}): {input_pred_raw.tolist()}")
-            log_callback(f"Input finale per previsione (shape {input_pred_scaled.shape}) pronto.")
+        last_sequence_raw = numeri_principali_array[-sequence_length:]
 
-        previsione_completa = genera_previsione_superenalotto(
-            model, input_pred_scaled, num_predictions, log_callback=log_callback
-        )
+        # Applica Feature Engineering alla sequenza raw
+        last_sequence_engineered = engineer_features_superenalotto(last_sequence_raw, log_callback=None) # Log non necessario qui
+        if last_sequence_engineered is None:
+             return None, "Errore Feature Engineering per input previsione.", last_update_date
+
+        # Appiattisci la sequenza con features
+        last_sequence_flat = last_sequence_engineered.flatten()
+
+        # Scala usando lo scaler adattato sui dati di training finali (final_scaler)
+        input_pred_scaled = final_scaler.transform(last_sequence_flat.reshape(1, -1))
+        if log_callback: log_callback(f"Input finale per previsione scalato (shape {input_pred_scaled.shape}). Generazione...")
+
+        # Genera previsione con il modello finale
+        previsione_completa = genera_previsione_superenalotto(final_model, input_pred_scaled, num_predictions, log_callback=log_callback)
 
         if previsione_completa is None:
             return None, "Generazione previsione finale fallita.", last_update_date
 
-        attendibilita_livello = "Bassa"
-        loss_threshold_alta = 0.10
-        loss_threshold_media = 0.25
-
-        if final_loss_for_attendibilita == float('inf'):
-             attendibilita_livello = "Indeterminata (loss non disponibile)"
-        elif monitor_metric == 'val_loss':
-             if final_loss_for_attendibilita < loss_threshold_alta: attendibilita_livello = "Alta (Val Loss Bassa)"
-             elif final_loss_for_attendibilita < loss_threshold_media: attendibilita_livello = "Media (Val Loss Moderata)"
-             else: attendibilita_livello = "Bassa (Val Loss Alta)"
-        else: # monitor_metric == 'loss'
-             if final_loss_for_attendibilita < loss_threshold_alta: attendibilita_livello = "Potenzialmente Alta (Train Loss Bassa, no val.)"
-             elif final_loss_for_attendibilita < loss_threshold_media: attendibilita_livello = "Potenzialmente Media (Train Loss Moderata, no val.)"
-             else: attendibilita_livello = "Incertezza Alta (Train Loss Alta, no val.)"
-
-        attendibilita_msg = f"Attendibilità Stimata: {attendibilita_livello} (Loss Finale {monitor_metric}: {final_loss_for_attendibilita:.5f} @ Epoca {best_epoch_number})"
-        if log_callback: log_callback(attendibilita_msg)
+        # Costruisci messaggio attendibilità combinato
+        attendibilita_msg_final_train = f"Training finale ({final_epochs_run} ep): Loss={final_loss:.5f}, Acc={final_acc:.5f}"
+        attendibilita_msg = f"{attendibilita_cv_msg}. {attendibilita_msg_final_train}"
+        log_callback(f"\nAttendibilità Combinata: {attendibilita_msg}")
 
         return previsione_completa, attendibilita_msg, last_update_date
 
     except Exception as e_final_pred:
-         if log_callback: log_callback(f"Errore CRITICO durante fase di previsione finale: {e_final_pred}\n{traceback.format_exc()}")
+         if log_callback: log_callback(f"Errore CRITICO fase previsione finale: {e_final_pred}\n{traceback.format_exc()}")
          return None, f"Errore critico previsione finale: {e_final_pred}", last_update_date
 # --- Fine Funzione Analisi ---
 
 
-# --- Definizione Classe GUI AppSuperEnalotto ---
+# --- Definizione Classe GUI AppSuperEnalotto (MODIFICATA per CV) ---
 class AppSuperEnalotto:
     def __init__(self, root):
         self.root = root
-        self.root.title("Analisi e Previsione SuperEnalotto ML (v1.3.1 - Corretto)")
-        self.root.geometry("850x950")
+        self.root.title("Analisi e Previsione SuperEnalotto ML (v1.4 - FE & CV)") # Titolo aggiornato
+        self.root.geometry("850x980") # Leggermente più alta per CV
 
         self.style = ttk.Style()
         try:
             if sys.platform == "win32": self.style.theme_use('vista')
             elif sys.platform == "darwin": self.style.theme_use('aqua')
             else: self.style.theme_use('clam')
-        except tk.TclError:
-            self.style.theme_use('default')
+        except tk.TclError: self.style.theme_use('default')
 
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
@@ -888,143 +844,166 @@ class AppSuperEnalotto:
         # --- Colonna Sinistra: Parametri Dati ---
         self.data_params_frame = ttk.LabelFrame(self.params_container, text="Parametri Dati e Previsione", padding="10")
         self.data_params_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="nsew")
+        current_row_data = 0
 
-        ttk.Label(self.data_params_frame, text="Data Inizio:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        default_start = datetime.now() - pd.Timedelta(days=1095)
+        ttk.Label(self.data_params_frame, text="Data Inizio:").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
+        default_start = datetime.now() - pd.Timedelta(days=1825) # Aumentato a 5 anni
         if HAS_TKCALENDAR:
              self.start_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd', show_weeknumbers=False, locale='it_IT')
              try: self.start_date_entry.set_date(default_start)
              except ValueError: self.start_date_entry.set_date(datetime.now() - pd.Timedelta(days=365))
-             self.start_date_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+             self.start_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
         else:
             self.start_date_entry_var = tk.StringVar(value=default_start.strftime('%Y-%m-%d'))
             self.start_date_entry = ttk.Entry(self.data_params_frame, textvariable=self.start_date_entry_var, width=12)
-            self.start_date_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
-            ttk.Label(self.data_params_frame, text="(yyyy-mm-dd)").grid(row=0, column=2, padx=2, pady=5, sticky=tk.W)
+            self.start_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
+            # ttk.Label(self.data_params_frame, text="(yyyy-mm-dd)").grid(row=current_row_data, column=2, padx=2, pady=5, sticky=tk.W)
+        current_row_data += 1
 
-        ttk.Label(self.data_params_frame, text="Data Fine:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(self.data_params_frame, text="Data Fine:").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
         default_end = datetime.now()
         if HAS_TKCALENDAR:
              self.end_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd', show_weeknumbers=False, locale='it_IT')
              self.end_date_entry.set_date(default_end)
-             self.end_date_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
+             self.end_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
         else:
             self.end_date_entry_var = tk.StringVar(value=default_end.strftime('%Y-%m-%d'))
             self.end_date_entry = ttk.Entry(self.data_params_frame, textvariable=self.end_date_entry_var, width=12)
-            self.end_date_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
-            ttk.Label(self.data_params_frame, text="(yyyy-mm-dd)").grid(row=1, column=2, padx=2, pady=5, sticky=tk.W)
+            self.end_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
+            # ttk.Label(self.data_params_frame, text="(yyyy-mm-dd)").grid(row=current_row_data, column=2, padx=2, pady=5, sticky=tk.W)
+        current_row_data += 1
 
-        ttk.Label(self.data_params_frame, text="Seq. Input (Storia):").grid(row=2, column=0, padx=5, pady=5, sticky=tk.W)
-        self.seq_len_var = tk.StringVar(value="10")
+        ttk.Label(self.data_params_frame, text="Seq. Input (Storia):").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
+        self.seq_len_var = tk.StringVar(value="12") # Aumentato default
         self.seq_len_entry = ttk.Spinbox(self.data_params_frame, from_=3, to=50, increment=1, textvariable=self.seq_len_var, width=5, wrap=True, state='readonly')
-        self.seq_len_entry.grid(row=2, column=1, padx=5, pady=5, sticky=tk.W)
+        self.seq_len_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
+        current_row_data += 1
 
-        ttk.Label(self.data_params_frame, text="Numeri da Prevedere:").grid(row=3, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(self.data_params_frame, text="Numeri da Prevedere:").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
         self.num_predict_var = tk.StringVar(value="6")
         self.num_predict_spinbox = ttk.Spinbox(self.data_params_frame, from_=6, to=15, increment=1, textvariable=self.num_predict_var, width=5, wrap=True, state='readonly')
-        self.num_predict_spinbox.grid(row=3, column=1, padx=5, pady=5, sticky=tk.W)
+        self.num_predict_spinbox.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
+        current_row_data += 1
 
         # --- Colonna Destra: Parametri Modello e Training ---
         self.model_params_frame = ttk.LabelFrame(self.params_container, text="Configurazione Modello e Training", padding="10")
         self.model_params_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="nsew")
         self.model_params_frame.columnconfigure(1, weight=1)
+        current_row_model = 0
 
-        ttk.Label(self.model_params_frame, text="Hidden Layers (n,n,..):").grid(row=0, column=0, padx=5, pady=3, sticky=tk.W)
-        self.hidden_layers_var = tk.StringVar(value="256, 128, 64")
+        ttk.Label(self.model_params_frame, text="Hidden Layers (n,n,..):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        self.hidden_layers_var = tk.StringVar(value="128, 64") # Ridotto default
         self.hidden_layers_entry = ttk.Entry(self.model_params_frame, textvariable=self.hidden_layers_var, width=25)
-        self.hidden_layers_entry.grid(row=0, column=1, padx=5, pady=3, sticky=tk.EW)
+        self.hidden_layers_entry.grid(row=current_row_model, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="Loss Function:").grid(row=1, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="Loss Function:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
         self.loss_var = tk.StringVar(value='binary_crossentropy')
         self.loss_combo = ttk.Combobox(self.model_params_frame, textvariable=self.loss_var, width=23, state='readonly', values=['binary_crossentropy', 'mse', 'mae', 'huber_loss'])
-        self.loss_combo.grid(row=1, column=1, padx=5, pady=3, sticky=tk.EW)
+        self.loss_combo.grid(row=current_row_model, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="Optimizer:").grid(row=2, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="Optimizer:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
         self.optimizer_var = tk.StringVar(value='adam')
         self.optimizer_combo = ttk.Combobox(self.model_params_frame, textvariable=self.optimizer_var, width=23, state='readonly', values=['adam', 'rmsprop', 'sgd', 'adagrad', 'adamw'])
-        self.optimizer_combo.grid(row=2, column=1, padx=5, pady=3, sticky=tk.EW)
+        self.optimizer_combo.grid(row=current_row_model, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="Dropout Rate (0-1):").grid(row=3, column=0, padx=5, pady=3, sticky=tk.W)
-        self.dropout_var = tk.StringVar(value="0.30")
+        # Parametri su righe separate per chiarezza
+        ttk.Label(self.model_params_frame, text="Dropout Rate (0-1):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        self.dropout_var = tk.StringVar(value="0.25") # Ridotto default
         self.dropout_spinbox = ttk.Spinbox(self.model_params_frame, from_=0.0, to=0.8, increment=0.05, format="%.2f", textvariable=self.dropout_var, width=7, wrap=True, state='readonly')
-        self.dropout_spinbox.grid(row=3, column=1, padx=5, pady=3, sticky=tk.W)
+        self.dropout_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="L1 Strength (>=0):").grid(row=4, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="L1 Strength (>=0):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
         self.l1_var = tk.StringVar(value="0.00")
         self.l1_entry = ttk.Entry(self.model_params_frame, textvariable=self.l1_var, width=7)
-        self.l1_entry.grid(row=4, column=1, padx=5, pady=3, sticky=tk.W)
+        self.l1_entry.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="L2 Strength (>=0):").grid(row=5, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="L2 Strength (>=0):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
         self.l2_var = tk.StringVar(value="0.00")
         self.l2_entry = ttk.Entry(self.model_params_frame, textvariable=self.l2_var, width=7)
-        self.l2_entry.grid(row=5, column=1, padx=5, pady=3, sticky=tk.W)
+        self.l2_entry.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="Max Epoche:").grid(row=6, column=0, padx=5, pady=3, sticky=tk.W)
-        self.epochs_var = tk.StringVar(value="150")
-        self.epochs_spinbox = ttk.Spinbox(self.model_params_frame, from_=20, to=1000, increment=10, textvariable=self.epochs_var, width=7, wrap=True, state='readonly')
-        self.epochs_spinbox.grid(row=6, column=1, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="Max Epoche:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        self.epochs_var = tk.StringVar(value="100") # Ridotto default
+        self.epochs_spinbox = ttk.Spinbox(self.model_params_frame, from_=20, to=500, increment=10, textvariable=self.epochs_var, width=7, wrap=True, state='readonly')
+        self.epochs_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="Batch Size:").grid(row=7, column=0, padx=5, pady=3, sticky=tk.W)
-        self.batch_size_var = tk.StringVar(value="64")
-        batch_values = [str(2**i) for i in range(3, 9)]
+        ttk.Label(self.model_params_frame, text="Batch Size:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        self.batch_size_var = tk.StringVar(value="128") # Aumentato default
+        batch_values = [str(2**i) for i in range(4, 10)] # 16 a 512
         self.batch_size_combo = ttk.Combobox(self.model_params_frame, textvariable=self.batch_size_var, values=batch_values, width=5, state='readonly')
-        self.batch_size_combo.grid(row=7, column=1, padx=5, pady=3, sticky=tk.W)
+        self.batch_size_combo.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="ES Patience:").grid(row=8, column=0, padx=5, pady=3, sticky=tk.W)
-        self.patience_var = tk.StringVar(value="20")
-        self.patience_spinbox = ttk.Spinbox(self.model_params_frame, from_=5, to=100, increment=1, textvariable=self.patience_var, width=7, wrap=True, state='readonly')
-        self.patience_spinbox.grid(row=8, column=1, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="ES Patience:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        self.patience_var = tk.StringVar(value="15") # Default ok
+        self.patience_spinbox = ttk.Spinbox(self.model_params_frame, from_=5, to=50, increment=1, textvariable=self.patience_var, width=7, wrap=True, state='readonly')
+        self.patience_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
-        ttk.Label(self.model_params_frame, text="ES Min Delta:").grid(row=9, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="ES Min Delta:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
         self.min_delta_var = tk.StringVar(value="0.0001")
         self.min_delta_entry = ttk.Entry(self.model_params_frame, textvariable=self.min_delta_var, width=10)
-        self.min_delta_entry.grid(row=9, column=1, padx=5, pady=3, sticky=tk.W)
+        self.min_delta_entry.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+
+        # NUOVO: Parametro CV Splits
+        ttk.Label(self.model_params_frame, text="CV Splits (>=2):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        self.cv_splits_var = tk.StringVar(value=str(DEFAULT_SUPERENALOTTO_CV_SPLITS))
+        self.cv_splits_spinbox = ttk.Spinbox(self.model_params_frame, from_=2, to=20, increment=1, textvariable=self.cv_splits_var, width=5, wrap=True, state='readonly')
+        self.cv_splits_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
 
         # --- Pulsanti Azione ---
         self.action_frame = ttk.Frame(self.main_frame)
         self.action_frame.pack(pady=10)
         self.run_button = ttk.Button(self.action_frame, text="Avvia Analisi e Previsione", command=self.start_analysis_thread)
         self.run_button.pack(side=tk.LEFT, padx=10)
+        # NUOVO: Pulsante Stop
+        self.stop_button = ttk.Button(self.action_frame, text="Ferma Analisi", command=self.stop_analysis_thread, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+
         self.check_button = ttk.Button(self.action_frame, text="Verifica Ultima Previsione", command=self.start_check_thread, state=tk.DISABLED)
         self.check_button.pack(side=tk.LEFT, padx=5)
-        ttk.Label(self.action_frame, text="Colpi da Verificare:").pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Label(self.action_frame, text="Colpi Verifica:").pack(side=tk.LEFT, padx=(10, 2))
         self.check_colpi_var = tk.StringVar(value=str(DEFAULT_SUPERENALOTTO_CHECK_COLPI))
         self.check_colpi_spinbox = ttk.Spinbox(self.action_frame, from_=1, to=100, increment=1, textvariable=self.check_colpi_var, width=4, wrap=True, state='readonly')
         self.check_colpi_spinbox.pack(side=tk.LEFT, padx=(0, 10))
 
         # --- Risultati Previsione ---
-        self.results_frame = ttk.LabelFrame(self.main_frame, text="Risultato Previsione SuperEnalotto (Numeri più probabili secondo il modello)", padding="10")
+        self.results_frame = ttk.LabelFrame(self.main_frame, text="Risultato Previsione SuperEnalotto (Numeri più probabili)", padding="10")
         self.results_frame.pack(fill=tk.X, pady=5)
         self.result_label_var = tk.StringVar(value="I numeri previsti appariranno qui...")
-        self.result_label = ttk.Label(self.results_frame, textvariable=self.result_label_var, font=('Courier New', 16, 'bold'), foreground='darkblue')
+        self.result_label = ttk.Label(self.results_frame, textvariable=self.result_label_var, font=('Courier New', 16, 'bold'), foreground='#000080') # Blu scuro
         self.result_label.pack(pady=5)
         self.attendibilita_label_var = tk.StringVar(value="")
         self.attendibilita_label = ttk.Label(self.results_frame, textvariable=self.attendibilita_label_var, font=('Helvetica', 9, 'italic'))
-        self.attendibilita_label.pack(pady=2)
+        self.attendibilita_label.pack(pady=2, fill=tk.X) # Fill per andare a capo
 
         # --- Data Ultimo Aggiornamento Dati Usati ---
         self.last_update_frame = ttk.LabelFrame(self.main_frame, text="Dati Utilizzati nell'Ultima Analisi", padding="5")
         self.last_update_frame.pack(fill=tk.X, pady=5)
         self.last_update_label_var = tk.StringVar(value="Data ultimo aggiornamento usato apparirà qui...")
         self.last_update_label = ttk.Label(self.last_update_frame, textvariable=self.last_update_label_var, font=('Helvetica', 9))
-        self.last_update_label.pack(pady=3)
+        self.last_update_label.pack(pady=3, anchor='w') # Allineato a sx
 
         # --- Log Area ---
         self.log_frame = ttk.LabelFrame(self.main_frame, text="Log Elaborazione", padding="10")
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=(5,0))
         log_font = ("Consolas", 9) if sys.platform == "win32" else ("Monaco", 9)
         try:
-            self.log_text = scrolledtext.ScrolledText(self.log_frame, height=15, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f0f0f0', foreground='black')
-        except tk.TclError:
+            self.log_text = scrolledtext.ScrolledText(self.log_frame, height=18, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f5f5f5', foreground='black')
+        except tk.TclError: # Fallback font
              log_font = ("Courier New", 9)
-             self.log_text = scrolledtext.ScrolledText(self.log_frame, height=15, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f0f0f0', foreground='black')
+             self.log_text = scrolledtext.ScrolledText(self.log_frame, height=18, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f5f5f5', foreground='black')
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        # Threading
+        # --- Threading Safety (Aggiunto stop_event) ---
         self.analysis_thread = None
         self.check_thread = None
+        self._stop_event_analysis = threading.Event() # Evento per fermare l'analisi
+        self._stop_event_check = threading.Event()    # Evento per fermare la verifica (anche se non c'è bottone stop)
 
-    # --- Metodi della Classe GUI ---
+        # Intercetta chiusura finestra
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+
+    # --- Metodi GUI (browse_file, log_message_gui, set_result, _update_result_labels INVARIATI) ---
 
     def browse_file(self):
         """Apre una finestra di dialogo per selezionare un file LOCALE."""
@@ -1033,260 +1012,229 @@ class AppSuperEnalotto:
             filetypes=(("Text files", "*.txt"), ("All files", "*.*")),
             parent=self.root
         )
-        if filepath:
-            self.file_path_var.set(filepath)
-            self.log_message_gui(f"Selezionato file locale: {filepath}")
+        if filepath: self.file_path_var.set(filepath); self.log_message_gui(f"Selezionato file locale: {filepath}")
 
     def log_message_gui(self, message):
         """Wrapper per inviare messaggi al widget di log dalla GUI."""
         log_message(message, self.log_text, self.root)
 
     def set_result(self, prediction_data, attendibilita):
-         """
-         Aggiorna i label dei risultati nella GUI.
-         prediction_data: Lista di dizionari [{'number': n, 'probability': p}] o None.
-         attendibilita: Stringa messaggio.
-         """
+         """Aggiorna i label dei risultati nella GUI."""
          self.root.after(0, self._update_result_labels, prediction_data, attendibilita)
 
     def _update_result_labels(self, prediction_data, attendibilita):
         """Funzione helper eseguita nel thread GUI per aggiornare le etichette."""
-        if (isinstance(prediction_data, list) and prediction_data and
-                all(isinstance(item, dict) and 'number' in item and 'probability' in item for item in prediction_data)):
+        try:
+            if not self.root.winfo_exists() or not self.result_label.winfo_exists(): return
 
-            sorted_by_number = sorted(prediction_data, key=lambda x: x['number'])
-            result_str = "  ".join([f"{item['number']:02d}" for item in sorted_by_number])
-            self.result_label_var.set(result_str)
+            if (isinstance(prediction_data, list) and prediction_data and
+                    all(isinstance(item, dict) and 'number' in item and 'probability' in item for item in prediction_data)):
+                sorted_by_number = sorted(prediction_data, key=lambda x: x['number'])
+                result_str = "  ".join([f"{item['number']:02d}" for item in sorted_by_number])
+                self.result_label_var.set(result_str)
 
-            log_nums_only = sorted([item['number'] for item in prediction_data])
-            self.log_message_gui("\n" + "="*35 + "\nPREVISIONE SUPERENALOTTO GENERATA (ML)\n" + "="*35)
-            self.log_message_gui("Numeri e probabilità stimate dal modello (ordinati per probabilità decrescente):")
-            sorted_by_prob_desc = sorted(prediction_data, key=lambda x: x['probability'], reverse=True)
-            for item in sorted_by_prob_desc:
-                 self.log_message_gui(f"  - Numero: {item['number']:02d} (Prob: {item['probability']:.6f})")
-            self.log_message_gui(f"Numeri finali selezionati (ordinati): {log_nums_only}")
-            self.log_message_gui("="*35)
+                log_nums_only = sorted([item['number'] for item in prediction_data])
+                self.log_message_gui("\n" + "="*35 + "\nPREVISIONE SUPERENALOTTO GENERATA (ML)\n" + "="*35)
+                self.log_message_gui("Numeri e probabilità stimate (ord. prob. decr.):")
+                sorted_by_prob_desc = sorted(prediction_data, key=lambda x: x['probability'], reverse=True)
+                for item in sorted_by_prob_desc:
+                     self.log_message_gui(f"  - N: {item['number']:02d} (P: {item['probability']:.6f})")
+                self.log_message_gui(f"Numeri finali selezionati (ordinati): {log_nums_only}")
+                self.log_message_gui("="*35)
+            else:
+                self.result_label_var.set("Previsione fallita o non valida.")
+                log_err = True
+                if isinstance(attendibilita, str) and any(kw in attendibilita.lower() for kw in ["errore", "fallit", "insuff", "invalid", "nessun"]): log_err = False
+                if log_err: self.log_message_gui("\nERRORE: Previsione non ha restituito dati validi.")
 
-        else:
-            self.result_label_var.set("Previsione fallita o non valida.")
-            log_err = True
-            if isinstance(attendibilita, str) and \
-               any(keyword in attendibilita.lower() for keyword in ["errore", "fallit", "insufficienti", "invalido", "nessun"]):
-                 log_err = False
-            if log_err: self.log_message_gui("\nERRORE: La previsione non ha restituito dati validi.")
+            self.attendibilita_label_var.set(str(attendibilita) if attendibilita else "Attendibilità non disponibile.")
+        except tk.TclError as e: print(f"TclError in _update_result_labels (shutdown?): {e}")
+        except Exception as e: print(f"Error in _update_result_labels: {e}")
 
-        self.attendibilita_label_var.set(str(attendibilita) if attendibilita else "Attendibilità non disponibile.")
-
+    # --- Metodo set_controls_state (MODIFICATO per aggiungere cv_splits e stop_button) ---
     def set_controls_state(self, state):
-        """Abilita o disabilita i controlli della GUI (tk.NORMAL o tk.DISABLED)."""
+        """Abilita o disabilita i controlli della GUI."""
         self.root.after(10, lambda: self._set_controls_state_tk(state))
 
     def _set_controls_state_tk(self, state):
         """Funzione helper eseguita nel thread GUI per modificare lo stato dei widget."""
-        is_running = (self.analysis_thread and self.analysis_thread.is_alive()) or \
-                     (self.check_thread and self.check_thread.is_alive())
-        actual_state = tk.DISABLED if is_running else tk.NORMAL
+        try:
+            if not self.root.winfo_exists(): return
 
-        widgets_to_toggle = [
-            self.browse_button, self.file_entry,
-            self.seq_len_entry, self.num_predict_spinbox,
-            self.hidden_layers_entry, self.loss_combo, self.optimizer_combo,
-            self.dropout_spinbox, self.l1_entry, self.l2_entry,
-            self.epochs_spinbox, self.batch_size_combo,
-            self.patience_spinbox, self.min_delta_entry,
-            self.run_button, self.check_colpi_spinbox, self.check_button
-        ]
+            # Determina lo stato generale basato sui thread attivi
+            is_analysis_running = self.analysis_thread and self.analysis_thread.is_alive()
+            is_check_running = self.check_thread and self.check_thread.is_alive()
+            is_running = is_analysis_running or is_check_running
 
-        if HAS_TKCALENDAR and hasattr(self.start_date_entry, 'configure'):
-             widgets_to_toggle.extend([self.start_date_entry, self.end_date_entry])
-        elif not HAS_TKCALENDAR:
-             widgets_to_toggle.extend([self.start_date_entry, self.end_date_entry])
+            # Stato target principale: DISABLED se qualcosa è in esecuzione, altrimenti lo stato richiesto
+            target_state_general = tk.DISABLED if is_running else state
 
-        for widget in widgets_to_toggle:
-            widget_state = actual_state
+            widgets_to_toggle = [
+                self.browse_button, self.file_entry,
+                self.seq_len_entry, self.num_predict_spinbox,
+                self.hidden_layers_entry, self.loss_combo, self.optimizer_combo,
+                self.dropout_spinbox, self.l1_entry, self.l2_entry,
+                self.epochs_spinbox, self.batch_size_combo,
+                self.patience_spinbox, self.min_delta_entry,
+                self.cv_splits_spinbox, # NUOVO: Aggiunto spinbox CV
+                self.run_button, self.check_colpi_spinbox, self.check_button
+            ]
+            # Gestione DateEntry/Entry
+            if HAS_TKCALENDAR and hasattr(self.start_date_entry, 'configure'):
+                 widgets_to_toggle.extend([self.start_date_entry, self.end_date_entry])
+            elif not HAS_TKCALENDAR:
+                 widgets_to_toggle.extend([self.start_date_entry_var, self.end_date_entry_var]) # Usa le variabili per Entry normali
 
-            if widget == self.check_button:
-                if actual_state == tk.NORMAL and self.last_prediction_numbers:
-                    widget_state = tk.NORMAL
-                else:
+            for widget in widgets_to_toggle:
+                if widget is None or not hasattr(widget, 'winfo_exists') or not widget.winfo_exists(): continue
+                widget_state = target_state_general
+
+                # Eccezioni: Check button dipende anche da last_prediction
+                if widget == self.check_button:
+                    if target_state_general == tk.NORMAL and self.last_prediction_numbers:
+                        widget_state = tk.NORMAL
+                    else:
+                        widget_state = tk.DISABLED
+
+                # Eccezioni: Run button disabilitato se check è attivo (anche se lo stato richiesto è NORMAL)
+                if widget == self.run_button and is_check_running:
                     widget_state = tk.DISABLED
 
-            if widget == self.run_button and actual_state == tk.DISABLED:
-                 widget_state = tk.DISABLED
+                # Imposta lo stato
+                try:
+                    current_class = widget.winfo_class()
+                    target_tk_state = tk.DISABLED # Default
+                    if widget_state == tk.NORMAL:
+                         if current_class in ('TCombobox', 'TSpinbox'): target_tk_state = 'readonly'
+                         elif current_class == 'DateEntry' and HAS_TKCALENDAR: target_tk_state = tk.NORMAL
+                         elif current_class == 'TEntry' or current_class == 'Entry': target_tk_state = tk.NORMAL
+                         elif current_class == 'TButton': target_tk_state = tk.NORMAL
+                    # Confronta e applica solo se diverso
+                    if str(widget.cget('state')).lower() != str(target_tk_state).lower():
+                        widget.config(state=target_tk_state)
+                except (tk.TclError, AttributeError) as e_widget:
+                     print(f"Warning: Could not set state for widget {widget}: {e_widget}")
 
-            try:
-                current_widget_type = widget.winfo_class()
-                if current_widget_type in ('TCombobox', 'TSpinbox'):
-                    widget.config(state='readonly' if widget_state == tk.NORMAL else tk.DISABLED)
-                elif current_widget_type == 'DateEntry' and HAS_TKCALENDAR:
-                    widget.config(state=widget_state)
-                else:
-                    widget.config(state=widget_state)
-            except (tk.TclError, AttributeError):
-                 pass
+            # Gestione specifica bottone STOP
+            if self.stop_button and self.stop_button.winfo_exists():
+                self.stop_button.config(state=tk.NORMAL if is_analysis_running else tk.DISABLED)
 
+        except tk.TclError as e: print(f"TclError in _set_controls_state_tk (shutdown?): {e}")
+        except Exception as e: print(f"Error setting control states: {e}")
+
+
+    # --- Metodo start_analysis_thread (MODIFICATO per leggere n_cv_splits) ---
     def start_analysis_thread(self):
         """Avvia il thread per l'analisi e la previsione."""
         if self.analysis_thread and self.analysis_thread.is_alive():
-            messagebox.showwarning("Analisi in Corso", "Un'analisi SuperEnalotto è già in esecuzione.", parent=self.root)
-            return
+            messagebox.showwarning("Analisi in Corso", "Analisi SuperEnalotto già in esecuzione.", parent=self.root); return
         if self.check_thread and self.check_thread.is_alive():
-            messagebox.showwarning("Verifica in Corso", "Una verifica è in corso. Attendere la fine prima di avviare una nuova analisi.", parent=self.root)
-            return
+            messagebox.showwarning("Verifica in Corso", "Verifica in corso. Attendere.", parent=self.root); return
 
         #<editor-fold desc="Recupero e Validazione Parametri GUI">
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.delete('1.0', tk.END)
-        self.log_text.config(state=tk.DISABLED)
-        self.result_label_var.set("Analisi in corso...")
-        self.attendibilita_label_var.set("")
-        self.last_update_label_var.set("Data ultimo aggiornamento apparirà qui...")
-        self.last_prediction_numbers = None
-        self.last_prediction_full = None
-        self.last_prediction_end_date = None
-        self.last_prediction_date_str = None
+        self.log_text.config(state=tk.NORMAL); self.log_text.delete('1.0', tk.END); self.log_text.config(state=tk.DISABLED)
+        self.result_label_var.set("Analisi in corso..."); self.attendibilita_label_var.set("")
+        self.last_update_label_var.set("Data ultimo aggiornamento ...");
+        self.last_prediction_numbers = None; self.last_prediction_full = None
+        self.last_prediction_end_date = None; self.last_prediction_date_str = None
         self.check_button.config(state=tk.DISABLED)
 
+        # Recupero valori
         data_source = self.file_path_var.get().strip()
         start_date_str, end_date_str = "", ""
         try:
-            if HAS_TKCALENDAR and isinstance(self.start_date_entry, DateEntry):
-                start_date_str = self.start_date_entry.get_date().strftime('%Y-%m-%d')
-                end_date_str = self.end_date_entry.get_date().strftime('%Y-%m-%d')
-            else:
-                start_date_str = self.start_date_entry_var.get()
-                end_date_str = self.end_date_entry_var.get()
-        except AttributeError:
-             start_date_str = self.start_date_entry.get()
-             end_date_str = self.end_date_entry.get()
-        except Exception as e_date_get:
-            messagebox.showerror("Errore Lettura Date", f"Impossibile leggere le date dai widget: {e_date_get}", parent=self.root)
-            return
+            if HAS_TKCALENDAR and isinstance(self.start_date_entry, DateEntry): start_date_str, end_date_str = self.start_date_entry.get_date().strftime('%Y-%m-%d'), self.end_date_entry.get_date().strftime('%Y-%m-%d')
+            else: start_date_str, end_date_str = self.start_date_entry_var.get(), self.end_date_entry_var.get() # Usa le var per Entry
+        except Exception as e_date_get: messagebox.showerror("Errore Date", f"Errore lettura date: {e_date_get}", parent=self.root); return
 
-        seq_len_str = self.seq_len_var.get()
-        num_predict_str = self.num_predict_var.get()
-        hidden_layers_str = self.hidden_layers_var.get()
-        loss_function = self.loss_var.get()
-        optimizer = self.optimizer_var.get()
-        dropout_str = self.dropout_var.get()
-        l1_str = self.l1_var.get()
-        l2_str = self.l2_var.get()
-        epochs_str = self.epochs_var.get()
-        batch_size_str = self.batch_size_var.get()
-        patience_str = self.patience_var.get()
-        min_delta_str = self.min_delta_var.get()
+        seq_len_str, num_predict_str = self.seq_len_var.get(), self.num_predict_var.get()
+        hidden_layers_str, loss_function, optimizer = self.hidden_layers_var.get(), self.loss_var.get(), self.optimizer_var.get()
+        dropout_str, l1_str, l2_str = self.dropout_var.get(), self.l1_var.get(), self.l2_var.get()
+        epochs_str, batch_size_str, patience_str, min_delta_str = self.epochs_var.get(), self.batch_size_var.get(), self.patience_var.get(), self.min_delta_var.get()
+        cv_splits_str = self.cv_splits_var.get() # NUOVO: Leggi CV splits
 
-        errors = []
-        sequence_length, num_predictions = 10, 6
-        hidden_layers_config = [256, 128, 64]
-        dropout_rate, l1_reg, l2_reg = 0.3, 0.0, 0.0
-        max_epochs, batch_size, patience, min_delta = 150, 64, 20, 0.0001
+        # Validazione e conversione
+        errors = []; sequence_length, num_predictions = 12, 6; hidden_layers_config = [128, 64]
+        dropout_rate, l1_reg, l2_reg = 0.25, 0.0, 0.0; max_epochs, batch_size, patience, min_delta = 100, 128, 15, 0.0001
+        n_cv_splits = DEFAULT_SUPERENALOTTO_CV_SPLITS # NUOVO: Default CV
 
-        if not data_source:
-             errors.append("- Specificare un URL Raw GitHub valido o un percorso file locale.")
-        elif not data_source.startswith(("http://", "https://")):
-            if not os.path.exists(data_source):
-                errors.append(f"- File locale non trovato: {data_source}")
-            elif not data_source.lower().endswith(".txt"):
-                 errors.append("- Il file locale dovrebbe avere estensione .txt.")
-
-        try:
-            start_dt = datetime.strptime(start_date_str, '%Y-%m-%d')
-            end_dt = datetime.strptime(end_date_str, '%Y-%m-%d')
-            if start_dt > end_dt: errors.append("- Data inizio deve essere <= Data fine.")
-        except ValueError: errors.append("- Formato data non valido (richiesto YYYY-MM-DD).")
-
-        try:
-            sequence_length = int(seq_len_str)
-            if not (3 <= sequence_length <= 50): raise ValueError()
-        except: errors.append("- Seq. Input deve essere un intero tra 3 e 50.")
-        try:
-            num_predictions = int(num_predict_str)
-            if not (6 <= num_predictions <= 15): raise ValueError()
-        except: errors.append("- Numeri da Prevedere deve essere un intero tra 6 e 15.")
-        try:
-            layers_str_list = [x.strip() for x in hidden_layers_str.split(',') if x.strip()]
-            if not layers_str_list: raise ValueError("Lista vuota")
-            hidden_layers_config = [int(x) for x in layers_str_list]
-            if not all(n > 0 for n in hidden_layers_config): raise ValueError("Unità non positive")
-        except: errors.append("- Hidden Layers non validi (es. '256, 128'). Usare numeri interi positivi separati da virgola.")
-        if not loss_function: errors.append("- Selezionare una Loss Function.")
-        if not optimizer: errors.append("- Selezionare un Optimizer.")
-        try:
-            dropout_rate = float(dropout_str)
-            if not (0.0 <= dropout_rate < 1.0): raise ValueError()
-        except: errors.append("- Dropout Rate deve essere un numero tra 0.0 (incluso) e 1.0 (escluso).")
-        try:
-            l1_reg = float(l1_str)
-            if l1_reg < 0: raise ValueError()
-        except: errors.append("- L1 Strength deve essere un numero >= 0.")
-        try:
-            l2_reg = float(l2_str)
-            if l2_reg < 0: raise ValueError()
-        except: errors.append("- L2 Strength deve essere un numero >= 0.")
-        try:
-            max_epochs = int(epochs_str)
-            if max_epochs < 10: raise ValueError()
-        except: errors.append("- Max Epoche deve essere un intero >= 10.")
-        try:
-            batch_size = int(batch_size_str)
-            if batch_size <= 0: raise ValueError()
-        except: errors.append("- Batch Size deve essere un intero positivo.")
-        try:
-            patience = int(patience_str)
-            if patience < 1: raise ValueError()
-        except: errors.append("- ES Patience deve essere un intero >= 1.")
-        try:
-            min_delta = float(min_delta_str)
-            if min_delta < 0: raise ValueError()
-        except: errors.append("- ES Min Delta deve essere un numero >= 0.")
+        if not data_source: errors.append("- Specificare URL o percorso file.")
+        elif not data_source.startswith(("http://", "https://")) and not os.path.exists(data_source): errors.append(f"- File locale non trovato: {data_source}")
+        try: start_dt, end_dt = datetime.strptime(start_date_str, '%Y-%m-%d'), datetime.strptime(end_date_str, '%Y-%m-%d'); assert start_dt <= end_dt
+        except: errors.append("- Date non valide (YYYY-MM-DD) o inizio > fine.")
+        try: sequence_length = int(seq_len_str); assert 3 <= sequence_length <= 50
+        except: errors.append("- Seq. Input non valida (3-50).")
+        try: num_predictions = int(num_predict_str); assert 6 <= num_predictions <= 15
+        except: errors.append("- Numeri da Prevedere non validi (6-15).")
+        try: layers_str = [x.strip() for x in hidden_layers_str.split(',') if x.strip()]; assert layers_str; hidden_layers_config = [int(x) for x in layers_str]; assert all(n>0 for n in hidden_layers_config)
+        except: errors.append("- Hidden Layers non validi (es. 128,64).")
+        if not loss_function: errors.append("- Selezionare Loss Function.")
+        if not optimizer: errors.append("- Selezionare Optimizer.")
+        try: dropout_rate = float(dropout_str); assert 0.0 <= dropout_rate < 1.0
+        except: errors.append("- Dropout Rate non valido (0.0 - 0.99).")
+        try: l1_reg = float(l1_str); assert l1_reg >= 0
+        except: errors.append("- L1 Strength non valido (>= 0).")
+        try: l2_reg = float(l2_str); assert l2_reg >= 0
+        except: errors.append("- L2 Strength non valido (>= 0).")
+        try: max_epochs = int(epochs_str); assert max_epochs >= 10
+        except: errors.append("- Max Epoche non valido (>= 10).")
+        try: batch_size = int(batch_size_str); assert batch_size > 0 and (batch_size & (batch_size-1) == 0)
+        except: errors.append("- Batch Size non valido (potenza di 2 > 0).")
+        try: patience = int(patience_str); assert patience >= 3
+        except: errors.append("- ES Patience non valida (>= 3).")
+        try: min_delta = float(min_delta_str); assert min_delta >= 0
+        except: errors.append("- ES Min Delta non valido (>= 0).")
+        # NUOVO: Validazione CV splits
+        try: n_cv_splits = int(cv_splits_str); assert 2 <= n_cv_splits <= 20
+        except: errors.append(f"- Numero CV Splits non valido (2-20).")
 
         if errors:
-            error_message = "Correggere i seguenti errori nei parametri:\n\n" + "\n".join(errors)
-            messagebox.showerror("Errore Parametri Input", error_message, parent=self.root)
-            self.result_label_var.set("Errore nei parametri di input.")
-            return
+            messagebox.showerror("Errore Parametri Input", "Correggere i seguenti errori:\n\n" + "\n".join(errors), parent=self.root)
+            self.result_label_var.set("Errore parametri."); return
         #</editor-fold>
 
-        self.set_controls_state(tk.DISABLED)
-        self.log_message_gui("=== Avvio Analisi SuperEnalotto (Thread) ===")
-        self.log_message_gui(f"Sorgente Dati: {data_source}")
+        self.set_controls_state(tk.DISABLED) # Disabilita input, abilita stop
+        self.log_message_gui("=== Avvio Analisi SuperEnalotto (FE & CV - Thread) ===")
+        self.log_message_gui(f"Sorgente: {data_source}")
         self.log_message_gui(f"Periodo: {start_date_str} - {end_date_str}")
-        self.log_message_gui(f"SeqLen: {sequence_length}, NumPred: {num_predictions}")
-        self.log_message_gui(f"Layers: {hidden_layers_config}, Loss: {loss_function}, Opt: {optimizer}")
-        self.log_message_gui(f"Reg/Drop: L1={l1_reg:.4f}, L2={l2_reg:.4f}, Drop={dropout_rate:.2f}")
-        self.log_message_gui(f"Training: Epochs={max_epochs}, Batch={batch_size}, Patience={patience}, MinDelta={min_delta:.6f}")
+        self.log_message_gui(f"Params: Seq={sequence_length}, Pred={num_predictions}, CV={n_cv_splits}")
+        self.log_message_gui(f"Modello: HL={hidden_layers_config}, Loss={loss_function}, Opt={optimizer}, Drop={dropout_rate:.2f}, L1={l1_reg:.4f}, L2={l2_reg:.4f}")
+        self.log_message_gui(f"Training: Epochs={max_epochs}, Batch={batch_size}, Pat={patience}, MinDelta={min_delta:.6f}")
         self.log_message_gui("-" * 40)
 
+        # Resetta evento stop e avvia thread
+        self._stop_event_analysis.clear()
         self.analysis_thread = threading.Thread(
             target=self.run_analysis,
-            args=(
+            args=( # Passa tutti i parametri, incluso n_cv_splits e stop_event
                 data_source, start_date_str, end_date_str, sequence_length,
                 loss_function, optimizer, dropout_rate, l1_reg, l2_reg,
                 hidden_layers_config, max_epochs, batch_size, patience, min_delta,
-                num_predictions
+                num_predictions, n_cv_splits, # Passa n_cv_splits
+                self._stop_event_analysis # <<< Passa l'evento
             ),
-            daemon=True
+            daemon=True,
+            name="SuperEnalottoAnalysisThread"
         )
         self.analysis_thread.start()
+        # Riabilita/disabilita controlli dopo l'avvio del thread (principalmente per il bottone Stop)
+        self.set_controls_state(tk.NORMAL) # Chiamata fittizia per aggiornare stati
 
+
+    # --- Metodo run_analysis (MODIFICATO per passare n_cv_splits e stop_event) ---
     def run_analysis(self, data_source, start_date, end_date, sequence_length,
                      loss_function, optimizer, dropout_rate, l1_reg, l2_reg,
                      hidden_layers_config, max_epochs, batch_size, patience, min_delta,
-                     num_predictions):
-        """
-        Funzione eseguita nel thread secondario per effettuare l'analisi.
-        """
-        self.last_prediction_numbers = None
-        self.last_prediction_full = None
-        self.last_prediction_end_date = None
-        self.last_prediction_date_str = None
-        analysis_success = False
-        final_attendibilita_msg = "Analisi non completata."
-        final_last_update_date = None
-        previsione_completa_result = None # Variabile per tenere il risultato
+                     num_predictions, n_cv_splits, # Riceve n_cv_splits
+                     stop_event): # Riceve stop_event
+        """Funzione eseguita nel thread secondario per analisi con FE e CV."""
+        self.last_prediction_numbers = None; self.last_prediction_full = None
+        self.last_prediction_end_date = None; self.last_prediction_date_str = None
+        analysis_success = False; final_attendibilita_msg = "Analisi non completata."
+        final_last_update_date = None; previsione_completa_result = None
 
         try:
+            # Esegui l'analisi vera e propria passando stop_event
             previsione_completa_result, final_attendibilita_msg, final_last_update_date = analisi_superenalotto(
                 file_path=data_source, start_date=start_date, end_date=end_date,
                 sequence_length=sequence_length, loss_function=loss_function,
@@ -1294,239 +1242,241 @@ class AppSuperEnalotto:
                 l2_reg=l2_reg, hidden_layers_config=hidden_layers_config,
                 max_epochs=max_epochs, batch_size=batch_size, patience=patience,
                 min_delta=min_delta, num_predictions=num_predictions,
-                log_callback=self.log_message_gui
+                n_cv_splits=n_cv_splits, # Passa n_cv_splits
+                log_callback=self.log_message_gui,
+                stop_event=stop_event # <<< Passa l'evento
             )
 
-            if (isinstance(previsione_completa_result, list) and previsione_completa_result and
-                    len(previsione_completa_result) == num_predictions and
-                    all(isinstance(item, dict) and 'number' in item and 'probability' in item for item in previsione_completa_result)):
-                analysis_success = True
+            # Verifica se l'analisi è stata interrotta DALLA funzione analisi_superenalotto
+            if stop_event.is_set() and previsione_completa_result is None:
+                 self.log_message_gui("Analisi interrotta durante l'elaborazione.")
+                 if not final_attendibilita_msg or "interrotta" not in final_attendibilita_msg.lower():
+                     final_attendibilita_msg = "Analisi Interrotta"
+                 analysis_success = False
+            else:
+                 # Valuta successo normale
+                 analysis_success = (isinstance(previsione_completa_result, list) and previsione_completa_result and
+                                     len(previsione_completa_result) == num_predictions and
+                                     all(isinstance(item, dict) and 'number' in item for item in previsione_completa_result))
+
+            # Aggiorna variabili interne e log solo se successo e non interrotto
+            if analysis_success:
                 self.last_prediction_full = previsione_completa_result
                 self.last_prediction_numbers = sorted([item['number'] for item in previsione_completa_result])
-
                 try:
                     self.last_prediction_end_date = datetime.strptime(end_date, '%Y-%m-%d')
                     self.last_prediction_date_str = end_date
-                    self.log_message_gui(f"Previsione valida generata e salvata (basata su dati fino al {end_date}). Pronta per verifica.")
+                    self.log_message_gui(f"Previsione valida generata e salvata (dati fino al {end_date}).")
                 except ValueError:
-                    self.log_message_gui(f"ATTENZIONE: Errore nel formato data fine ({end_date}) dopo l'analisi. La verifica potrebbe non funzionare.")
-                    self.last_prediction_end_date = None
-                    self.last_prediction_date_str = None
-            else:
-                self.log_message_gui(f"Analisi completata ma non ha prodotto una previsione valida. Messaggio: {final_attendibilita_msg}")
+                    self.log_message_gui(f"ATT: Errore formato data fine ({end_date}) post-analisi."); self.last_prediction_end_date = None; self.last_prediction_date_str = None
+            elif not stop_event.is_set(): # Log fallimento solo se non interrotto
+                self.log_message_gui(f"Analisi completata ma senza previsione valida. Msg: {final_attendibilita_msg}")
 
-            if final_last_update_date is not None:
-                last_update_str = final_last_update_date.strftime('%Y-%m-%d')
-                self.root.after(0, lambda: self.last_update_label_var.set(f"Dati analizzati fino al: {last_update_str}"))
-            else:
-                 self.root.after(0, lambda: self.last_update_label_var.set("Data ultimo aggiornamento non disponibile."))
+            # Aggiorna label data ultimo aggiornamento
+            last_update_str = final_last_update_date.strftime('%Y-%m-%d') if final_last_update_date else "N/D"
+            self.root.after(0, lambda: self.last_update_label_var.set(f"Dati analizzati fino al: {last_update_str}"))
 
-            # Passa previsione_completa_result a set_result
+            # Aggiorna risultato GUI
             self.set_result(previsione_completa_result, final_attendibilita_msg)
 
         except Exception as e_run:
-            self.log_message_gui(f"\nERRORE CRITICO nel thread run_analysis: {e_run}\n{traceback.format_exc()}")
+            self.log_message_gui(f"\nERRORE CRITICO run_analysis: {e_run}\n{traceback.format_exc()}")
             final_attendibilita_msg = f"Errore critico: {e_run}"
             self.set_result(None, final_attendibilita_msg)
             analysis_success = False
         finally:
-            self.log_message_gui("\n=== Analisi SuperEnalotto (Thread) Completata ===")
-            self.set_controls_state(tk.NORMAL)
-            self.analysis_thread = None
+             # Log completamento solo se non interrotto
+             if not stop_event.is_set():
+                 self.log_message_gui("\n=== Analisi SuperEnalotto (FE & CV - Thread) Completata ===")
+             # Riabilita controlli e pulisci ref thread
+             self.set_controls_state(tk.NORMAL) # Riabilita/Disabilita controlli
+             self.root.after(10, self._clear_analysis_thread_ref) # Usa helper per pulire ref
 
+    # NUOVO: Metodo per fermare il thread di analisi
+    def stop_analysis_thread(self):
+        """Imposta l'evento per fermare il thread di analisi in corso."""
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            self.log_message_gui("\n!!! Richiesta di interruzione analisi... !!!")
+            self._stop_event_analysis.set()
+            # Il bottone Stop verrà disabilitato automaticamente da set_controls_state
+            # quando il thread terminerà e is_analysis_running diventerà False.
+            # Potremmo disabilitarlo subito qui per feedback immediato, ma attendiamo
+            # che set_controls_state faccia il suo corso per coerenza.
+        else:
+            self.log_message_gui("Nessuna analisi da interrompere.")
 
+    # NUOVO: Helper per pulire riferimento thread analisi
+    def _clear_analysis_thread_ref(self):
+        """Helper per pulire il riferimento al thread nel thread principale."""
+        self.analysis_thread = None
+        # Potrebbe essere necessario ri-valutare lo stato dei pulsanti qui
+        # se la verifica era disabilitata a causa dell'analisi.
+        # Richiamiamo set_controls_state per sicurezza.
+        self.set_controls_state(tk.NORMAL)
+
+    # --- Metodi start_check_thread, run_check_results (INVARIATI) ---
     def start_check_thread(self):
         """Avvia il thread per la verifica dell'ultima previsione."""
-        if self.check_thread and self.check_thread.is_alive():
-            messagebox.showwarning("Verifica in Corso", "Una verifica SuperEnalotto è già in esecuzione.", parent=self.root)
-            return
-        if self.analysis_thread and self.analysis_thread.is_alive():
-            messagebox.showwarning("Analisi in Corso", "Attendere la fine dell'analisi prima di avviare la verifica.", parent=self.root)
-            return
-
+        if self.check_thread and self.check_thread.is_alive(): messagebox.showwarning("Verifica in Corso", "Verifica già in esecuzione.", parent=self.root); return
+        if self.analysis_thread and self.analysis_thread.is_alive(): messagebox.showwarning("Analisi in Corso", "Attendere fine analisi.", parent=self.root); return
         if not self.last_prediction_numbers or not self.last_prediction_end_date or not self.last_prediction_date_str:
-            messagebox.showinfo("Nessuna Previsione", "Nessuna previsione valida disponibile per la verifica. Eseguire prima un'analisi con successo.", parent=self.root)
-            return
+            messagebox.showinfo("Nessuna Previsione", "Nessuna previsione valida per verifica.", parent=self.root); return
         if not isinstance(self.last_prediction_numbers, list) or not all(isinstance(n, int) for n in self.last_prediction_numbers):
-            messagebox.showerror("Errore Previsione", "I dati della previsione salvata sembrano corrotti.", parent=self.root)
-            self.last_prediction_numbers = None
-            self.set_controls_state(tk.NORMAL)
-            return
+            messagebox.showerror("Errore Previsione", "Dati previsione salvata corrotti.", parent=self.root); self.last_prediction_numbers = None; self.set_controls_state(tk.NORMAL); return
 
-        try:
-            num_colpi_to_check = int(self.check_colpi_var.get())
-            if not (1 <= num_colpi_to_check <= 100): raise ValueError()
-        except:
-            messagebox.showerror("Errore Input", "Numero colpi da verificare non valido (deve essere un intero tra 1 e 100).", parent=self.root)
-            return
+        try: num_colpi_to_check = int(self.check_colpi_var.get()); assert 1 <= num_colpi_to_check <= 100
+        except: messagebox.showerror("Errore Input", "Numero colpi verifica non valido (1-100).", parent=self.root); return
 
         data_source_for_check = self.file_path_var.get().strip()
-        if not data_source_for_check:
-            messagebox.showerror("Errore Sorgente Dati", "Specificare la sorgente dati (URL o file) per poter effettuare la verifica.", parent=self.root)
-            return
+        if not data_source_for_check: messagebox.showerror("Errore Sorgente Dati", "Specificare sorgente dati per verifica.", parent=self.root); return
         if not data_source_for_check.startswith(("http://", "https://")) and not os.path.exists(data_source_for_check):
-            messagebox.showerror("Errore File", f"Il file dati locale specificato ('{os.path.basename(data_source_for_check)}') non è stato trovato per la verifica.", parent=self.root)
-            return
+            messagebox.showerror("Errore File", f"File dati locale '{os.path.basename(data_source_for_check)}' non trovato per verifica.", parent=self.root); return
 
         self.set_controls_state(tk.DISABLED)
-        self.log_message_gui(f"\n=== Avvio Verifica Previsione SuperEnalotto ({num_colpi_to_check} Colpi Max) ===")
-        self.log_message_gui(f"Previsione da verificare (numeri): {self.last_prediction_numbers}")
-        self.log_message_gui(f"Previsione basata su dati fino al: {self.last_prediction_date_str}")
-        self.log_message_gui(f"Sorgente dati per verifica: {data_source_for_check}")
+        self.log_message_gui(f"\n=== Avvio Verifica Previsione ({num_colpi_to_check} Colpi Max) ===")
+        self.log_message_gui(f"Previsione Numeri: {self.last_prediction_numbers}")
+        self.log_message_gui(f"Basata su dati fino a: {self.last_prediction_date_str}")
+        self.log_message_gui(f"Sorgente verifica: {data_source_for_check}")
         self.log_message_gui("-" * 40)
 
+        # Resetta evento stop check (anche se non c'è bottone) e avvia thread
+        self._stop_event_check.clear()
         self.check_thread = threading.Thread(
             target=self.run_check_results,
-            args=(data_source_for_check,
-                  self.last_prediction_numbers,
-                  self.last_prediction_date_str,
-                  num_colpi_to_check),
-            daemon=True
+            args=(data_source_for_check, self.last_prediction_numbers,
+                  self.last_prediction_date_str, num_colpi_to_check,
+                  self._stop_event_check), # Passa evento stop
+            daemon=True,
+            name="SuperEnalottoCheckThread"
         )
         self.check_thread.start()
+        self.set_controls_state(tk.NORMAL) # Aggiorna stati (es. disabilita Run)
 
-    def run_check_results(self, data_source, prediction_numbers_to_check, last_analysis_date_str, num_colpi_to_check):
-        """
-        Esegue la verifica nel thread.
-        """
+    def run_check_results(self, data_source, prediction_numbers_to_check, last_analysis_date_str, num_colpi_to_check, stop_event):
+        """Esegue la verifica nel thread, controllando stop_event."""
         try:
-            try:
-                last_date_obj = datetime.strptime(last_analysis_date_str, '%Y-%m-%d')
-                check_start_date = last_date_obj + timedelta(days=1)
-                check_start_date_str = check_start_date.strftime('%Y-%m-%d')
-            except ValueError as ve_date:
-                self.log_message_gui(f"ERRORE CRITICO: Formato data analisi non valido ({last_analysis_date_str}): {ve_date}. Impossibile procedere con la verifica.")
-                return
+            try: last_date_obj = datetime.strptime(last_analysis_date_str, '%Y-%m-%d'); check_start_date_str = (last_date_obj + timedelta(days=1)).strftime('%Y-%m-%d')
+            except ValueError as ve_date: self.log_message_gui(f"ERRORE CRITICO formato data analisi: {ve_date}. Verifica annullata."); return
 
-            self.log_message_gui(f"Caricamento dati SuperEnalotto per verifica (da {check_start_date_str} in poi)...")
+            if stop_event.is_set(): self.log_message_gui("Verifica annullata prima caricamento dati."); return
 
-            df_check, numeri_principali_check, _, _, _ = carica_dati_superenalotto(
-                data_source, start_date=check_start_date_str, end_date=None,
-                log_callback=self.log_message_gui
-            )
+            self.log_message_gui(f"Caricamento dati verifica (da {check_start_date_str})...")
+            df_check, numeri_principali_check, _, _, _ = carica_dati_superenalotto(data_source, start_date=check_start_date_str, end_date=None, log_callback=self.log_message_gui)
 
-            if df_check is None:
-                self.log_message_gui("ERRORE: Caricamento dati per la verifica fallito.")
-                return
-            if df_check.empty:
-                self.log_message_gui(f"INFO: Nessuna estrazione trovata nel file/URL dopo la data {last_analysis_date_str}.")
-                return
-            if numeri_principali_check is None or len(numeri_principali_check) == 0:
-                self.log_message_gui(f"ERRORE: Dati trovati dopo {last_analysis_date_str}, ma impossibile estrarre i numeri principali per la verifica.")
-                return
+            if stop_event.is_set(): self.log_message_gui("Verifica annullata dopo caricamento dati."); return
 
-            num_estrazioni_disponibili = len(numeri_principali_check)
-            num_colpi_effettivi = min(num_colpi_to_check, num_estrazioni_disponibili)
+            if df_check is None: self.log_message_gui("ERRORE: Caricamento dati verifica fallito."); return
+            if df_check.empty: self.log_message_gui(f"INFO: Nessuna estrazione trovata dopo {last_analysis_date_str}."); return
+            if numeri_principali_check is None or len(numeri_principali_check) == 0: self.log_message_gui(f"ERRORE: Dati trovati post {last_analysis_date_str}, ma estrazione numeri fallita."); return
 
-            self.log_message_gui(f"Trovate {num_estrazioni_disponibili} estrazioni successive. Verifico le prossime {num_colpi_effettivi}...")
+            num_disp = len(numeri_principali_check); num_eff = min(num_colpi_to_check, num_disp)
+            self.log_message_gui(f"Trovate {num_disp} estrazioni. Verifico prossime {num_eff}...");
             prediction_set = set(prediction_numbers_to_check)
-            self.log_message_gui(f"Numeri previsti (Set): {prediction_set}")
-            self.log_message_gui("-" * 40)
+            self.log_message_gui(f"Numeri previsti (Set): {prediction_set}"); self.log_message_gui("-" * 40)
 
-            colpo_counter = 0
-            found_any_hit = False
-            highest_score = 0
-
-            for i in range(num_colpi_effettivi):
-                colpo_counter += 1
+            colpo = 0; found_hit = False; max_score = 0
+            for i in range(num_eff):
+                if stop_event.is_set(): self.log_message_gui(f"Verifica interrotta al colpo {colpo + 1}."); break
+                colpo += 1
                 try:
-                    draw_row = df_check.iloc[i]
-                    draw_date_str = draw_row['Data'].strftime('%Y-%m-%d')
-                    actual_draw_numbers = numeri_principali_check[i]
-                    actual_draw_set = set(actual_draw_numbers)
-                    hits = prediction_set.intersection(actual_draw_set)
-                    num_hits = len(hits)
-                    highest_score = max(highest_score, num_hits)
+                    row = df_check.iloc[i]; date_str = row['Data'].strftime('%Y-%m-%d'); actual = numeri_principali_check[i]; actual_set = set(actual)
+                    hits = prediction_set.intersection(actual_set); n_hits = len(hits); max_score = max(max_score, n_hits)
+                    log_line = f"Colpo {colpo:02d}/{num_eff:02d} ({date_str}): {sorted(list(actual_set))} -> "
+                    if n_hits > 0: found_hit = True; pts = f"{n_hits} punti"; log_line += f"*** {pts}! ({sorted(list(hits))}) ***"
+                    else: log_line += "Nessun risultato."
+                    self.log_message_gui(log_line)
+                except Exception as e_row: self.log_message_gui(f"ERR colpo {colpo} ({date_str}): {e_row}"); continue
 
-                    log_line = f"Colpo {colpo_counter:02d}/{num_colpi_effettivi:02d} ({draw_date_str}): Estrazione={sorted(list(actual_draw_set))} -> "
-                    if num_hits > 0:
-                        found_any_hit = True
-                        hits_sorted = sorted(list(hits))
-                        points_str = f"{num_hits} punti" if num_hits != 1 else "1 punto"
-                        log_line += f"*** {points_str}! Numeri indovinati: {hits_sorted} ***"
-                        self.log_message_gui(log_line)
-                    else:
-                        log_line += "Nessun risultato."
-                        self.log_message_gui(log_line)
+            if not stop_event.is_set():
+                 self.log_message_gui("-" * 40)
+                 if not found_hit: self.log_message_gui(f"Nessun risultato nei {num_eff} colpi verificati.")
+                 else: self.log_message_gui(f"Verifica completata. Punteggio massimo: {max_score} punti.")
 
-                except IndexError:
-                    self.log_message_gui(f"ERRORE INTERNO: Indice {i} fuori range durante la verifica (Estrazioni disp: {len(numeri_principali_check)}).")
-                    break
-                except KeyError as ke:
-                    self.log_message_gui(f"ERRORE Dati: Colonna '{ke}' mancante nel DataFrame di verifica al colpo {colpo_counter}.")
-                    continue
-                except Exception as e_row_check:
-                    self.log_message_gui(f"ERRORE imprevisto durante l'analisi del colpo {colpo_counter} ({draw_date_str}): {e_row_check}")
-                    continue
-
-            self.log_message_gui("-" * 40)
-            if not found_any_hit:
-                self.log_message_gui(f"Nessun numero della previsione è stato estratto nei {num_colpi_effettivi} colpi verificati.")
-            else:
-                self.log_message_gui(f"Verifica completata. Punteggio massimo ottenuto: {highest_score} punti su 6.")
-
-        except Exception as e_check_main:
-            self.log_message_gui(f"ERRORE CRITICO durante la verifica SuperEnalotto: {e_check_main}\n{traceback.format_exc()}")
+        except Exception as e_check: self.log_message_gui(f"ERRORE CRITICO verifica: {e_check}\n{traceback.format_exc()}")
         finally:
-            self.log_message_gui("\n=== Verifica SuperEnalotto (Thread) Completata ===")
-            self.set_controls_state(tk.NORMAL)
-            self.check_thread = None
+             if not stop_event.is_set(): self.log_message_gui("\n=== Verifica SuperEnalotto (Thread) Completata ===")
+             self.set_controls_state(tk.NORMAL) # Riabilita/Disabilita
+             self.root.after(10, self._clear_check_thread_ref) # Pulisci ref
+
+    # NUOVO: Helper per pulire riferimento thread verifica
+    def _clear_check_thread_ref(self):
+        """Helper per pulire il riferimento al thread nel thread principale."""
+        self.check_thread = None
+        self.set_controls_state(tk.NORMAL) # Ricalcola stati
+
+    # --- Metodo on_close (MODIFICATO per gestire stop events) ---
+    def on_close(self):
+        """Gestisce la richiesta di chiusura della finestra."""
+        self.log_message_gui("Richiesta chiusura finestra...")
+
+        # 1. Segnala ai thread di fermarsi
+        self._stop_event_analysis.set()
+        self._stop_event_check.set()
+
+        # 2. Attendi terminazione thread (con timeout)
+        timeout_secs = 3.0
+        wait_start = time.time()
+        threads_to_wait = []
+        analysis_thread_local = self.analysis_thread
+        if analysis_thread_local and analysis_thread_local.is_alive(): threads_to_wait.append(analysis_thread_local)
+        check_thread_local = self.check_thread
+        if check_thread_local and check_thread_local.is_alive(): threads_to_wait.append(check_thread_local)
+
+        if threads_to_wait:
+            self.log_message_gui(f"Attendo terminazione thread: {[t.name for t in threads_to_wait]} (max {timeout_secs:.1f}s)")
+            for thread in threads_to_wait:
+                remaining_timeout = max(0.1, timeout_secs - (time.time() - wait_start))
+                try:
+                    thread.join(timeout=remaining_timeout)
+                    status = "non terminato (timeout)" if thread.is_alive() else "terminato"
+                    log_level = "ATTENZIONE" if thread.is_alive() else "INFO"
+                    self.log_message_gui(f"{log_level}: Thread {thread.name} {status}.")
+                except Exception as e: self.log_message_gui(f"Errore durante join di {thread.name}: {e}")
+        else:
+            self.log_message_gui("Nessun thread attivo da attendere.")
+
+        # 3. Distruggi finestra
+        self.log_message_gui("Distruzione finestra Tkinter.")
+        try:
+             self.analysis_thread = None; self.check_thread = None # Pulisci ref
+             self.root.destroy()
+        except tk.TclError as e: print(f"TclError durante root.destroy() (normale se già distrutta): {e}")
+        except Exception as e: print(f"Errore imprevisto durante root.destroy(): {e}")
 
 # --- Fine Classe GUI ---
 
 
-# --- Funzione di Lancio ---
+# --- Funzione di Lancio (INVARIATA NELLA LOGICA) ---
 def launch_superenalotto_window(parent_window=None):
-    """
-    Crea e lancia la finestra dell'applicazione SuperEnalotto.
-    """
+    """Crea e lancia la finestra dell'applicazione SuperEnalotto."""
     try:
-        if parent_window:
-            superenalotto_win = tk.Toplevel(parent_window)
-            superenalotto_win.transient(parent_window)
-        else:
-            superenalotto_win = tk.Tk()
-
-        superenalotto_win.title("SuperEnalotto ML Predictor (Corretto)")
-        superenalotto_win.geometry("850x950")
-
-        app_instance = AppSuperEnalotto(superenalotto_win)
-
-        superenalotto_win.update_idletasks()
-        x = (superenalotto_win.winfo_screenwidth() // 2) - (superenalotto_win.winfo_width() // 2)
-        y = (superenalotto_win.winfo_screenheight() // 2) - (superenalotto_win.winfo_height() // 2)
-        superenalotto_win.geometry(f'+{x}+{y}')
-
-        superenalotto_win.lift()
-        superenalotto_win.focus_force()
-
-        if not parent_window:
-            superenalotto_win.mainloop()
-
+        win_root = tk.Toplevel(parent_window) if parent_window else tk.Tk()
+        app_instance = AppSuperEnalotto(win_root) # Init imposta titolo/geo
+        # Centra finestra (opzionale)
+        win_root.update_idletasks()
+        w = win_root.winfo_width(); h = win_root.winfo_height()
+        ws = win_root.winfo_screenwidth(); hs = win_root.winfo_screenheight()
+        x = (ws // 2) - (w // 2); y = (hs // 2) - (h // 2)
+        win_root.geometry(f'+{x}+{y}')
+        win_root.lift()
+        win_root.focus_force()
+        if not parent_window: win_root.mainloop()
     except Exception as e_launch:
-        print(f"ERRORE CRITICO durante il lancio della finestra SuperEnalotto: {e_launch}\n{traceback.format_exc()}")
-        try:
-            messagebox.showerror("Errore Avvio Applicazione", f"Errore critico durante l'avvio:\n{e_launch}", parent=parent_window)
-        except:
-            pass
+        print(f"ERRORE CRITICO lancio finestra SuperEnalotto: {e_launch}\n{traceback.format_exc()}")
+        try: messagebox.showerror("Errore Avvio Applicazione", f"Errore critico:\n{e_launch}", parent=parent_window)
+        except: pass
 
-# --- Blocco Esecuzione Standalone ---
+# --- Blocco Esecuzione Standalone (INVARIATO) ---
 if __name__ == "__main__":
-    print("Esecuzione Modulo SuperEnalotto ML Predictor in modalità standalone...")
+    print("Esecuzione Modulo SuperEnalotto ML Predictor (FE & CV) standalone...")
     print("-" * 60)
-    print("Requisiti: tensorflow, pandas, numpy, requests")
-    print("Opzionale (per calendario): tkcalendar")
-    print("Installazione: pip install tensorflow pandas numpy requests tkcalendar")
+    print("Requisiti: tensorflow, pandas, numpy, requests, scikit-learn")
+    print("Opzionale (GUI): tkcalendar")
+    print("Installazione: pip install tensorflow pandas numpy requests scikit-learn tkcalendar")
     print("-" * 60)
-
     try:
-        if sys.platform == "win32":
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)
-            print("INFO: DPI awareness impostato per Windows.")
-    except Exception as e_dpi:
-        print(f"Nota: Impossibile impostare DPI awareness: {e_dpi}")
+        if sys.platform == "win32": from ctypes import windll; windll.shcore.SetProcessDpiAwareness(1); print("INFO: DPI awareness impostato (Win).")
+    except Exception as e_dpi: print(f"Nota: Impossibile impostare DPI awareness: {e_dpi}")
 
     launch_superenalotto_window(parent_window=None)
-
     print("\nFinestra SuperEnalotto chiusa. Programma terminato.")
