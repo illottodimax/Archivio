@@ -14,6 +14,8 @@ import itertools
 from datetime import datetime
 import numpy as np
 import pandas as pd
+import requests
+import io
 import tensorflow as tf
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog # messagebox importato
@@ -184,6 +186,31 @@ def open_superenalotto_module_helper(parent_root):
     else:
         messagebox.showwarning("Modulo Mancante", "Il modulo SuperEnalotto ('selotto_module.py') non è stato caricato correttamente.", parent=parent_root)
 
+GITHUB_USER = "illottodimax"
+GITHUB_REPO = "Archivio"
+GITHUB_BRANCH = "main"
+GITHUB_FOLDER_PATH = "" # Lascia vuoto se i file sono nella root del repo
+BASE_GITHUB_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_FOLDER_PATH}"
+
+# Definizione dei percorsi dei file delle ruote
+FILE_RUOTE = {
+    'BA': 'BARI.txt', 'CA': 'CAGLIARI.txt', 'FI': 'FIRENZE.txt',
+    'GE': 'GENOVA.txt', 'MI': 'MILANO.txt', 'NA': 'NAPOLI.txt',
+    'PA': 'PALERMO.txt', 'RM': 'ROMA.txt', 'TO': 'TORINO.txt',
+    'VE': 'VENEZIA.txt','NZ':'NAZIONALE.txt'
+}
+
+# Configurazione del logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 def set_seed(seed_value=42):
     """Imposta il seme per la riproducibilità dei risultati."""
     os.environ['PYTHONHASHSEED'] = str(seed_value)
@@ -195,29 +222,66 @@ def set_seed(seed_value=42):
 set_seed()
    
 def carica_dati_grezzi(ruota):
-    """Carica i dati grezzi, gestendo errori."""
+    """Carica i dati grezzi da GitHub, gestendo errori."""
     file_name = FILE_RUOTE.get(ruota)
-    if not file_name or not os.path.exists(file_name):
-        logger.error(f"Ruota o file non trovato: {ruota}")
+    if not file_name:
+        logger.error(f"Abbreviazione ruota non trovata nel dizionario: {ruota}")
         return None
 
+    # Costruisci l'URL completo per il file raw specifico
+    url = f"{BASE_GITHUB_URL.rstrip('/')}/{file_name}"
+    logger.info(f"Tentativo di caricamento dati per {ruota} da GitHub URL: {url}")
+
     try:
-        # Usa sep='\t' per le tabulazioni.
-        df = pd.read_csv(file_name, header=None, sep='\t', encoding='utf-8')
-        # Rinomina le colonne, *INCLUDENDO* la colonna 'Ruota':
-        df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]  # <-- CORRETTO
-        return df
-    except FileNotFoundError:
-        logger.error(f"File non trovato: {file_name}")
+        response = requests.get(url, timeout=15) # Timeout di 15 secondi
+        response.raise_for_status() # Controlla errori HTTP (404, 500, etc.)
+        content = response.text
+
+        if not content or content.isspace():
+             logger.warning(f"File scaricato da {url} per {ruota} è vuoto o contiene solo spazi.")
+             return None
+
+        # Usa io.StringIO per leggere la stringa come file
+        df = pd.read_csv(io.StringIO(content), header=None, sep='\t', encoding='utf-8')
+
+        expected_columns = 7 # Data, Ruota, Num1, Num2, Num3, Num4, Num5
+        if df.shape[1] == expected_columns:
+             df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]
+             # Verifica Consistenza Sigla (opzionale ma utile)
+             sigle_nel_file = df['Ruota'].unique()
+             if len(sigle_nel_file) == 1 and sigle_nel_file[0].upper() != ruota.upper():
+                 logger.warning(f"Sigla nel file {file_name} ('{sigle_nel_file[0]}') != chiave usata ('{ruota}').")
+             elif len(sigle_nel_file) > 1:
+                  logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+
+             logger.info(f"Dati caricati e colonne rinominate per {ruota} da GitHub.")
+             return df
+        else:
+             logger.error(f"Formato colonne inatteso ({df.shape[1]}) in {file_name} da {url}. Attese {expected_columns}.")
+             try: logger.error(f"Prime righe:\n{df.head().to_string()}")
+             except Exception: logger.error("Impossibile mostrare prime righe.")
+             return None
+
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout (15s) durante connessione a {url} per {ruota}")
+        return None
+    except requests.exceptions.HTTPError as http_err:
+         logger.error(f"Errore HTTP ({http_err.response.status_code}) da {url} per {ruota}: {http_err}")
+         if http_err.response.status_code == 404: logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
+         return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Errore di rete/connessione da {url} per {ruota}: {req_err}")
         return None
     except pd.errors.EmptyDataError:
-        logger.error(f"Il file {file_name} è vuoto.")
+        logger.error(f"Errore Pandas: Nessun dato (EmptyDataError) da {url} per {ruota}.")
         return None
     except pd.errors.ParserError as e:
-         logger.error(f"Errore di parsing del file {file_name}: {e}")
-         return None
+        logger.error(f"Errore parsing Pandas del TSV da {url} per {ruota}: {e}")
+        try: logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
+        except NameError: logger.error("Contenuto non disponibile.")
+        return None
     except Exception as e:
-        logger.error(f"Errore generico nel caricamento: {e}")
+        logger.exception(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}: {e}")
         return None
 
 def preprocessa_dati(df, start_date, end_date):
@@ -301,17 +365,6 @@ def normalizza_numeri(numeri):
 # Colori per i pulsanti
 BUTTON_DEFAULT_COLOR = "#C9E4CA"  # Verde chiaro
 BUTTON_SELECTED_COLOR = "#4CAF50"  # Verde scuro
-
-# Configurazione del logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 def salva_info_modello(ruota, fold_idx, train_loss, val_loss, ratio, epoch, model_path):
     """
@@ -427,14 +480,6 @@ class ModelConfig:
 
         # Log del valore iniziale di patience
         logger.info(f"Valore iniziale di patience: {self.patience}")
-
-# Definizione dei percorsi dei file delle ruote
-FILE_RUOTE = {
-    'BA': 'BARI.txt', 'CA': 'CAGLIARI.txt', 'FI': 'FIRENZE.txt',
-    'GE': 'GENOVA.txt', 'MI': 'MILANO.txt', 'NA': 'NAPOLI.txt',
-    'PA': 'PALERMO.txt', 'RM': 'ROMA.txt', 'TO': 'TORINO.txt',
-    'VE': 'VENEZIA.txt','NZ':'NAZIONALE.txt'
-}
 
 # Funzioni di supporto
 def verifica_numeri(verifica_tutte_ruote=False):
@@ -5127,49 +5172,75 @@ def select_optimizer(opt):
                ("SGD" in btn["text"] and opt == "sgd"):
                 btn["bg"] = BUTTON_SELECTED_COLOR
 
-def select_loss_function(loss_func):
-    """Imposta la funzione di perdita selezionata."""
+def select_loss_function(loss_func_identifier):
+    """
+    Imposta la funzione di perdita selezionata e aggiorna i colori dei pulsanti.
+    Corretto per gestire l'evidenziazione del pulsante 'Custom'.
+
+    Args:
+        loss_func_identifier (str): L'identificativo della funzione di loss
+                                     (es. 'mean_squared_error', 'custom_loss_function').
+    """
     try:
-        if loss_func == "huber_loss":
-            # Usa direttamente l'oggetto Huber Loss
-            config.loss_function_choice = Huber(delta=1.0)  # Puoi personalizzare il delta
-        elif loss_func == "mean_squared_error":
-            config.loss_function_choice = "mean_squared_error"
-        elif loss_func == "mean_absolute_error":
-            config.loss_function_choice = "mean_absolute_error"
-        elif loss_func == "log_cosh":
-            config.loss_function_choice = LogCosh()
-        elif loss_func == "custom_loss_function":
-            config.loss_function_choice = custom_loss_function
+        # Determina la configurazione logica basata sull'identificatore
+        if loss_func_identifier == "custom_loss_function":
+            if 'custom_loss_function' not in globals() or not callable(custom_loss_function):
+                 messagebox.showerror("Errore Interno", "La funzione 'custom_loss_function' non è definita!")
+                 logger.error("Tentativo di selezionare 'custom_loss_function' ma non è definita.")
+                 return # Esce se la funzione custom manca
+
+            config.loss_function_choice = custom_loss_function # Oggetto funzione
             config.use_custom_loss = True
-            return
-        else:
-            config.loss_function_choice = loss_func
-        
-        # Resetta la flag custom loss se non è la custom loss
-        config.use_custom_loss = False
-        
-        logger.info(f"Funzione di perdita selezionata: {loss_func}")
-        
-        # Aggiorna il colore dei pulsanti
-        for btn in frame_loss_function.winfo_children():
-            if isinstance(btn, tk.Button):
-                btn["bg"] = BUTTON_DEFAULT_COLOR
-                
-                if "MSE" in btn["text"] and loss_func == "mean_squared_error":
-                    btn["bg"] = BUTTON_SELECTED_COLOR
-                elif "MAE" in btn["text"] and loss_func == "mean_absolute_error":
-                    btn["bg"] = BUTTON_SELECTED_COLOR
-                elif "Custom" in btn["text"] and loss_func == "custom_loss_function":
-                    btn["bg"] = BUTTON_SELECTED_COLOR
-                elif "Huber" in btn["text"] and loss_func == "huber_loss":
-                    btn["bg"] = BUTTON_SELECTED_COLOR
-                elif "Log Cosh" in btn["text"] and loss_func == "log_cosh":
-                    btn["bg"] = BUTTON_SELECTED_COLOR
-    
+            log_msg = "Funzione di perdita selezionata: Custom"
+
+        else: # Gestisce tutti gli altri casi (MSE, MAE, Huber, LogCosh, o stringhe generiche)
+            config.use_custom_loss = False # Assicura che il flag custom sia False
+            if loss_func_identifier == "huber_loss":
+                config.loss_function_choice = Huber(delta=1.0)
+                log_msg = "Funzione di perdita selezionata: Huber"
+            elif loss_func_identifier == "log_cosh":
+                config.loss_function_choice = LogCosh()
+                log_msg = "Funzione di perdita selezionata: Log Cosh"
+            elif loss_func_identifier in ["mean_squared_error", "mean_absolute_error"]:
+                config.loss_function_choice = loss_func_identifier # Stringa MSE o MAE
+                log_msg = f"Funzione di perdita selezionata: {loss_func_identifier.upper()}"
+            else:
+                # Fallback per stringhe non specificate
+                config.loss_function_choice = loss_func_identifier
+                log_msg = f"Funzione di perdita selezionata: {loss_func_identifier} (come stringa)"
+                logger.warning(f"Identificativo loss '{loss_func_identifier}' non gestito esplicitamente. Usato come stringa.")
+
+        logger.info(log_msg) # Logga DOPO aver impostato la configurazione
+
+        # --- Aggiornamento colori (eseguito SEMPRE dopo aver impostato config) ---
+        found_custom_button = None # Per riferimento
+        for widget in frame_loss_function.winfo_children():
+            if isinstance(widget, tk.Button):
+                button_text = widget.cget('text')
+                # 1. Resetta sempre a default
+                widget["bg"] = BUTTON_DEFAULT_COLOR
+
+                # 2. Determina se questo bottone è quello selezionato
+                is_selected = False
+                if "MSE" in button_text and loss_func_identifier == "mean_squared_error": is_selected = True
+                elif "MAE" in button_text and loss_func_identifier == "mean_absolute_error": is_selected = True
+                elif "Huber" in button_text and loss_func_identifier == "huber_loss": is_selected = True
+                elif "Log Cosh" in button_text and loss_func_identifier == "log_cosh": is_selected = True
+                elif "Custom" in button_text:
+                    found_custom_button = widget # Trovato il bottone custom
+                    if loss_func_identifier == "custom_loss_function": # È selezionato?
+                        is_selected = True
+
+                # 3. Applica colore selezionato
+                if is_selected:
+                    widget["bg"] = BUTTON_SELECTED_COLOR
+
+    except NameError as ne:
+        logger.error(f"Errore NameError in select_loss_function: Oggetto '{loss_func_identifier}' non definito? {ne}", exc_info=True)
+        messagebox.showerror("Errore Interno", f"La funzione di loss '{loss_func_identifier}' non è stata trovata.")
     except Exception as e:
         messagebox.showerror("Errore", f"Impossibile impostare la funzione di loss: {e}")
-        logger.error(f"Errore nell'impostazione della loss function: {e}")
+        logger.error(f"Errore nell'impostazione della loss function: {e}", exc_info=True)
 
 def select_activation(activation):
     """
@@ -7697,7 +7768,7 @@ def main():
     try:
         # Imposta stati iniziali dei bottoni di selezione
         select_optimizer('adam')
-        select_loss_function('mean_squared_error')
+        select_loss_function('custom_loss_function')
         select_activation('relu')
         select_regularization(None)
         select_model_type('dense')

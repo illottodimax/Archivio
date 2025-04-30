@@ -11,9 +11,11 @@ import time
 import threading
 import traceback
 import itertools
-from datetime import datetime, timedelta # Aggiunto timedelta (spesso utile con le date)
+from datetime import datetime
 import numpy as np
 import pandas as pd
+import requests
+import io
 import tensorflow as tf
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog # messagebox importato
@@ -27,12 +29,13 @@ from sklearn.preprocessing import MinMaxScaler, RobustScaler
 from sklearn.model_selection import TimeSeriesSplit # Per la cross-validation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, LSTM, GaussianNoise
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, LSTM, GaussianNoise, Input
+from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, LearningRateScheduler
 from tensorflow.keras.regularizers import l1, l2
 from tensorflow.keras.losses import MeanSquaredError, MeanAbsoluteError, Huber, LogCosh
 from tensorflow.keras.utils import register_keras_serializable
-# from tkinter import messagebox, ttk, filedialog # Già importato sopra
+from tkinter import messagebox, ttk, filedialog
 from tkcalendar import DateEntry
 from PIL import Image, ImageTk
 from analizzatore_ritardi_lotto import AnalizzatoreRitardiLotto, apri_analizzatore_ritardi
@@ -169,6 +172,7 @@ except ImportError as e_selotto:
     SUPERENALOTTO_MODULE_LOADED = False
     print(f"ATTENZIONE: Modulo SuperEnalotto ('selotto_module.py') non trovato o errore import: {e_selotto}")
 
+# NUOVO: Helper per SuperEnalotto
 def open_superenalotto_module_helper(parent_root):
     """Controlla se il modulo SuperEnalotto è caricato e lo avvia."""
     if SUPERENALOTTO_MODULE_LOADED and callable(launch_superenalotto_window):
@@ -182,7 +186,31 @@ def open_superenalotto_module_helper(parent_root):
     else:
         messagebox.showwarning("Modulo Mancante", "Il modulo SuperEnalotto ('selotto_module.py') non è stato caricato correttamente.", parent=parent_root)
 
-# --- Tua funzione set_seed (Originale) ---
+GITHUB_USER = "illottodimax"
+GITHUB_REPO = "Archivio"
+GITHUB_BRANCH = "main"
+GITHUB_FOLDER_PATH = "" # Lascia vuoto se i file sono nella root del repo
+BASE_GITHUB_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{GITHUB_FOLDER_PATH}"
+
+# Definizione dei percorsi dei file delle ruote
+FILE_RUOTE = {
+    'BA': 'BARI.txt', 'CA': 'CAGLIARI.txt', 'FI': 'FIRENZE.txt',
+    'GE': 'GENOVA.txt', 'MI': 'MILANO.txt', 'NA': 'NAPOLI.txt',
+    'PA': 'PALERMO.txt', 'RM': 'ROMA.txt', 'TO': 'TORINO.txt',
+    'VE': 'VENEZIA.txt','NZ':'NAZIONALE.txt'
+}
+
+# Configurazione del logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 def set_seed(seed_value=42):
     """Imposta il seme per la riproducibilità dei risultati."""
     os.environ['PYTHONHASHSEED'] = str(seed_value)
@@ -190,33 +218,70 @@ def set_seed(seed_value=42):
     np.random.seed(seed_value)
     tf.random.set_seed(seed_value)
 
-# Impostazione del seed per la riproducibilità (tua chiamata originale)
+# Impostazione del seed per la riproducibilità
 set_seed()
    
 def carica_dati_grezzi(ruota):
-    """Carica i dati grezzi, gestendo errori."""
+    """Carica i dati grezzi da GitHub, gestendo errori."""
     file_name = FILE_RUOTE.get(ruota)
-    if not file_name or not os.path.exists(file_name):
-        logger.error(f"Ruota o file non trovato: {ruota}")
+    if not file_name:
+        logger.error(f"Abbreviazione ruota non trovata nel dizionario: {ruota}")
         return None
 
+    # Costruisci l'URL completo per il file raw specifico
+    url = f"{BASE_GITHUB_URL.rstrip('/')}/{file_name}"
+    logger.info(f"Tentativo di caricamento dati per {ruota} da GitHub URL: {url}")
+
     try:
-        # Usa sep='\t' per le tabulazioni.
-        df = pd.read_csv(file_name, header=None, sep='\t', encoding='utf-8')
-        # Rinomina le colonne, *INCLUDENDO* la colonna 'Ruota':
-        df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]  # <-- CORRETTO
-        return df
-    except FileNotFoundError:
-        logger.error(f"File non trovato: {file_name}")
+        response = requests.get(url, timeout=15) # Timeout di 15 secondi
+        response.raise_for_status() # Controlla errori HTTP (404, 500, etc.)
+        content = response.text
+
+        if not content or content.isspace():
+             logger.warning(f"File scaricato da {url} per {ruota} è vuoto o contiene solo spazi.")
+             return None
+
+        # Usa io.StringIO per leggere la stringa come file
+        df = pd.read_csv(io.StringIO(content), header=None, sep='\t', encoding='utf-8')
+
+        expected_columns = 7 # Data, Ruota, Num1, Num2, Num3, Num4, Num5
+        if df.shape[1] == expected_columns:
+             df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]
+             # Verifica Consistenza Sigla (opzionale ma utile)
+             sigle_nel_file = df['Ruota'].unique()
+             if len(sigle_nel_file) == 1 and sigle_nel_file[0].upper() != ruota.upper():
+                 logger.warning(f"Sigla nel file {file_name} ('{sigle_nel_file[0]}') != chiave usata ('{ruota}').")
+             elif len(sigle_nel_file) > 1:
+                  logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+
+             logger.info(f"Dati caricati e colonne rinominate per {ruota} da GitHub.")
+             return df
+        else:
+             logger.error(f"Formato colonne inatteso ({df.shape[1]}) in {file_name} da {url}. Attese {expected_columns}.")
+             try: logger.error(f"Prime righe:\n{df.head().to_string()}")
+             except Exception: logger.error("Impossibile mostrare prime righe.")
+             return None
+
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout (15s) durante connessione a {url} per {ruota}")
+        return None
+    except requests.exceptions.HTTPError as http_err:
+         logger.error(f"Errore HTTP ({http_err.response.status_code}) da {url} per {ruota}: {http_err}")
+         if http_err.response.status_code == 404: logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
+         return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Errore di rete/connessione da {url} per {ruota}: {req_err}")
         return None
     except pd.errors.EmptyDataError:
-        logger.error(f"Il file {file_name} è vuoto.")
+        logger.error(f"Errore Pandas: Nessun dato (EmptyDataError) da {url} per {ruota}.")
         return None
     except pd.errors.ParserError as e:
-         logger.error(f"Errore di parsing del file {file_name}: {e}")
-         return None
+        logger.error(f"Errore parsing Pandas del TSV da {url} per {ruota}: {e}")
+        try: logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
+        except NameError: logger.error("Contenuto non disponibile.")
+        return None
     except Exception as e:
-        logger.error(f"Errore generico nel caricamento: {e}")
+        logger.exception(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}: {e}")
         return None
 
 def preprocessa_dati(df, start_date, end_date):
@@ -300,17 +365,6 @@ def normalizza_numeri(numeri):
 # Colori per i pulsanti
 BUTTON_DEFAULT_COLOR = "#C9E4CA"  # Verde chiaro
 BUTTON_SELECTED_COLOR = "#4CAF50"  # Verde scuro
-
-# Configurazione del logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 def salva_info_modello(ruota, fold_idx, train_loss, val_loss, ratio, epoch, model_path):
     """
@@ -427,14 +481,6 @@ class ModelConfig:
 
         # Log del valore iniziale di patience
         logger.info(f"Valore iniziale di patience: {self.patience}")
-
-# Definizione dei percorsi dei file delle ruote
-FILE_RUOTE = {
-    'BA': 'BARI.txt', 'CA': 'CAGLIARI.txt', 'FI': 'FIRENZE.txt',
-    'GE': 'GENOVA.txt', 'MI': 'MILANO.txt', 'NA': 'NAPOLI.txt',
-    'PA': 'PALERMO.txt', 'RM': 'ROMA.txt', 'TO': 'TORINO.txt',
-    'VE': 'VENEZIA.txt','NZ':'NAZIONALE.txt'
-}
 
 # Funzioni di supporto
 def verifica_numeri(verifica_tutte_ruote=False):
