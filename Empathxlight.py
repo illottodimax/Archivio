@@ -7309,6 +7309,32 @@ def lancia_rit_pos():
         print(f"Errore durante l'esecuzione di {script_name_rit_pos}: {e}")
         messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name_rit_pos}:\n{e}")
 
+def lancia_costruttore_lotto():
+    """
+    Lancia lo script esterno costruttore.py usando subprocess.
+    costruttore.py è uno script Tkinter autonomo.
+    """
+    script_name_costruttore = "costruttore.py"  # Nome del tuo script costruttore
+    
+    try:
+        print(f"Tentativo di lanciare (subprocess): {sys.executable} {script_name_costruttore}")
+        # Popen lancia lo script e non attende la sua terminazione.
+        # Questo è corretto per lanciare un'altra GUI.
+        process_costruttore = subprocess.Popen([sys.executable, script_name_costruttore])
+        print(f"Script {script_name_costruttore} lanciato con PID: {process_costruttore.pid}")
+        # Non c'è bisogno di process_costruttore.wait() se vuoi che le due GUI siano indipendenti.
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name_costruttore} non è stato trovato.")
+        # Mostra un messagebox se il tuo programma principale ha una GUI
+        if tk._default_root: # Controlla se Tkinter è inizializzato
+             messagebox.showerror("Errore",
+                                 f"Script {script_name_costruttore} non trovato!\n"
+                                 f"Assicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante il tentativo di lanciare {script_name_costruttore}: {e}")
+        if tk._default_root:
+            messagebox.showerror("Errore", f"Errore nell'avvio di {script_name_costruttore}:\n{e}")
+
 def esegui_pannello_estrazioni():
     """Avvia il modulo esterno del pannello estrazioni."""
     try:
@@ -7454,7 +7480,7 @@ def main():
     frame_salvataggio = tk.Frame(tab_main); frame_salvataggio.pack(pady=10, fill=tk.X)
     # btn_salva_risultati = tk.Button(frame_salvataggio, text="Salva Risultati", command=salva_risultati, bg="#FFDDC1", width=20); btn_salva_risultati.pack(side=tk.LEFT, padx=10)
     btn_aggiorna_estrazioni = tk.Button(frame_salvataggio, text="Aggiornamento Estrazioni", command=esegui_aggiornamento, bg="#FFDDC1", width=20); btn_aggiorna_estrazioni.pack(side=tk.LEFT, padx=10)
-    btn_carica_valuta_modello = tk.Button(frame_salvataggio, text="Carica e Valuta Modello", command=carica_e_valuta_modello, bg="green", fg="white", width=20); btn_carica_valuta_modello.pack(side=tk.LEFT, padx=10)
+    btn_carica_valuta_modello = tk.Button(frame_salvataggio, text="Carica e Valuta Modello", command=carica_e_valuta_modello, bg="green", fg="white", width=18); btn_carica_valuta_modello.pack(side=tk.LEFT, padx=10)
     btn_manage_license = tk.Button(frame_salvataggio, text="Gestione Licenza", command=gestisci_licenza, bg="#FFDDC1", width=20); btn_manage_license.pack(side=tk.LEFT, padx=10)
     frame_pulsanti = tk.LabelFrame(tab_main, text="Selezione Ruota", padx=10, pady=10); frame_pulsanti.pack(pady=10, fill=tk.X)
     instructions_label = tk.Label(frame_pulsanti, text="Passo 1: Seleziona il range estrazionale, eventualmente varia i Paramentri di analisi, seleziona il tuo Modello, perfeziona tra le Avanzate, scegli la ruota ed elabora:", bg="#FFE4B5", fg="black", font=("Arial", 10, "bold"), padx=10, pady=10, wraplength=1000, justify=tk.LEFT); instructions_label.pack(fill=tk.X)
@@ -7479,15 +7505,17 @@ def main():
     btn_multi_ruota = tk.Button(start_frame, text="ANALISI MULTI-RUOTA", command=apri_selezione_multi_ruota, bg="#FF9900", fg="white", font=("Arial", 12, "bold"), width=30, height=2); btn_multi_ruota.pack(pady=5)
     # Assicurati che analisi_avanzata_completa sia definita o importata correttamente
     btn_analisi_avanzata = tk.Button(start_frame, text="ANALISI AVANZATA", command=analisi_avanzata_completa, bg="#9370DB", fg="white", font=("Arial", 12, "bold"), width=30, height=2); btn_analisi_avanzata.pack(pady=5)
-    btn_analisi_completa = tk.Button(frame_salvataggio, text="Analisi Completa", command=analisi_avanzata_completa, bg="#90EE90", fg="black", width=16); btn_analisi_completa.pack(side=tk.LEFT, padx=5)
-    btn_analisi_interpretabile = tk.Button(frame_salvataggio, text="Analisi Interpretabile", command=analisi_interpretabile, bg="#FFD700", fg="black", width=18); btn_analisi_interpretabile.pack(side=tk.LEFT, padx=5)
+    btn_analisi_completa = tk.Button(frame_salvataggio, text="Analisi Completa", command=analisi_avanzata_completa, bg="#90EE90", fg="black", width=15); btn_analisi_completa.pack(side=tk.LEFT, padx=5)
+    btn_analisi_interpretabile = tk.Button(frame_salvataggio, text="Analisi Interpretabile", command=analisi_interpretabile, bg="#FFD700", fg="black", width=15); btn_analisi_interpretabile.pack(side=tk.LEFT, padx=5)
     btn_numeri_spia = tk.Button(frame_salvataggio, text="Numeri Spia", command=esegui_script_numeri_spia, bg="#E6E6FA", fg="black", width=12); btn_numeri_spia.pack(side=tk.LEFT, padx=5)
     btn_analizzatore_ritardi = tk.Button(frame_salvataggio, text="Analisi Ritardi", command=lambda: apri_analizzatore_ritardi(root, FILE_RUOTE), bg="#E6E6FA", fg="black", width=14); btn_analizzatore_ritardi.pack(side=tk.LEFT, padx=5)
     btn_legge_terzo = tk.Button(frame_salvataggio, text="Legge del Terzo", command=esegui_script_legge_terzo, bg="#E6E6FA", fg="black", width=14); btn_legge_terzo.pack(side=tk.LEFT, padx=5)
     btn_spie_dec = tk.Button(frame_salvataggio, text="Spie Dec", command=lancia_spie_dec, bg="#E6E6FA", fg="black", width=14); btn_spie_dec.pack(side=tk.LEFT, padx=5)
     btn_spie_quind = tk.Button(frame_salvataggio, text="Spie Quind", command=lancia_spie_quind, bg="#E6E6FA", fg="black", width=14);  btn_spie_quind.pack(side=tk.LEFT, padx=5)
     btn_ritardi_plus = tk.Button(frame_salvataggio, text="RitardiPlus", command=lancia_ritardi_plus, bg="#E6E6FA", fg="black", width=14); btn_ritardi_plus.pack(side=tk.LEFT, padx=5)
-    btn_rit_pos = tk.Button(frame_salvataggio, text="Rit Pos", command=lancia_rit_pos, bg="#E6E6FA", fg="black", width=14); btn_rit_pos.pack(side=tk.LEFT, padx=5)     
+    btn_rit_pos = tk.Button(frame_salvataggio, text="Rit Pos", command=lancia_rit_pos, bg="#E6E6FA", fg="black", width=14); btn_rit_pos.pack(side=tk.LEFT, padx=5)
+    btn_constructor = tk.Button(frame_salvataggio, text="Constructor",  command=lancia_costruttore_lotto,  bg="#E6E6FA", fg="black", width=14)
+    btn_constructor.pack(side=tk.LEFT, padx=5)     
     frame_date = tk.LabelFrame(tab_main, text="Periodo di Analisi", padx=10, pady=10); frame_date.pack(pady=10, fill=tk.X)
     tk.Label(frame_date, text="Data di Inizio:", bg="#ADD8E6", fg="black", width=15).grid(row=0, column=0, padx=5, pady=5, sticky="e")
     entry_start_date = DateEntry(frame_date, width=15, date_pattern='yyyy/mm/dd', bg="#F0F0F0", fg="black"); entry_start_date.grid(row=0, column=1, padx=5, pady=5, sticky="w")

@@ -7439,6 +7439,32 @@ def lancia_rit_pos():
         print(f"Errore durante l'esecuzione di {script_name_rit_pos}: {e}")
         messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name_rit_pos}:\n{e}")
 
+def lancia_costruttore_lotto():
+    """
+    Lancia lo script esterno costruttore.py usando subprocess.
+    costruttore.py è uno script Tkinter autonomo.
+    """
+    script_name_costruttore = "costruttore.py"  # Nome del tuo script costruttore
+    
+    try:
+        print(f"Tentativo di lanciare (subprocess): {sys.executable} {script_name_costruttore}")
+        # Popen lancia lo script e non attende la sua terminazione.
+        # Questo è corretto per lanciare un'altra GUI.
+        process_costruttore = subprocess.Popen([sys.executable, script_name_costruttore])
+        print(f"Script {script_name_costruttore} lanciato con PID: {process_costruttore.pid}")
+        # Non c'è bisogno di process_costruttore.wait() se vuoi che le due GUI siano indipendenti.
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name_costruttore} non è stato trovato.")
+        # Mostra un messagebox se il tuo programma principale ha una GUI
+        if tk._default_root: # Controlla se Tkinter è inizializzato
+             messagebox.showerror("Errore",
+                                 f"Script {script_name_costruttore} non trovato!\n"
+                                 f"Assicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante il tentativo di lanciare {script_name_costruttore}: {e}")
+        if tk._default_root:
+            messagebox.showerror("Errore", f"Errore nell'avvio di {script_name_costruttore}:\n{e}")
+
 
 def esegui_pannello_estrazioni():
     """Avvia il modulo esterno del pannello estrazioni."""
@@ -7652,7 +7678,7 @@ def main():
     # btn_salva_risultati.pack(side=tk.LEFT, padx=5)
     btn_aggiorna_estrazioni = tk.Button(frame_salvataggio, text="Aggiornamento Estrazioni", command=esegui_aggiornamento, bg="#FFDDC1", width=20)
     btn_aggiorna_estrazioni.pack(side=tk.LEFT, padx=5)
-    btn_carica_valuta_modello = tk.Button(frame_salvataggio, text="Carica e Valuta Modello", command=carica_e_valuta_modello, bg="green", fg="white", width=20)
+    btn_carica_valuta_modello = tk.Button(frame_salvataggio, text="Carica e Valuta Modello", command=carica_e_valuta_modello, bg="green", fg="white", width=18)
     btn_carica_valuta_modello.pack(side=tk.LEFT, padx=5)
     btn_manage_license = tk.Button(frame_salvataggio, text="Gestione Licenza", command=gestisci_licenza, bg="#FFDDC1", width=16)
     btn_manage_license.pack(side=tk.LEFT, padx=5)
@@ -7674,6 +7700,8 @@ def main():
     btn_ritardi_plus.pack(side=tk.LEFT, padx=5)
     btn_rit_pos = tk.Button(frame_salvataggio, text="Rit Pos", command=lancia_rit_pos, bg="#E6E6FA", fg="black", width=14)
     btn_rit_pos.pack(side=tk.LEFT, padx=5)
+    btn_constructor = tk.Button(frame_salvataggio, text="Constructor",  command=lancia_costruttore_lotto,  bg="#E6E6FA", fg="black", width=14)
+    btn_constructor.pack(side=tk.LEFT, padx=5)
     # Frame Selezione Ruota
     frame_pulsanti = tk.LabelFrame(tab_main, text="Selezione Ruota", padx=10, pady=10)
     frame_pulsanti.pack(pady=10, fill=tk.X)
