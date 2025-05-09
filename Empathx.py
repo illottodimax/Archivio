@@ -186,6 +186,66 @@ def open_superenalotto_module_helper(parent_root):
     else:
         messagebox.showwarning("Modulo Mancante", "Il modulo SuperEnalotto ('selotto_module.py') non è stato caricato correttamente.", parent=parent_root)
 
+# *******************************************************************
+# *** INIZIO AGGIUNTE PER MODULO Numerical Binary ***
+
+# Flag per sapere se il modulo Numerical Binary è stato caricato
+NUMERICAL_BINARY_MODULE_LOADED = False
+# Placeholder per la funzione di avvio del Numerical Binary
+launch_numerical_binary_func = None
+
+try:
+    # Assicurati che il nome del file e della funzione corrispondano
+    # a quelli nel file numerical_binary_module.py
+    from numerical_binary_module import launch_numerical_binary_window as imported_numerical_binary_launch_func
+
+    # Se l'importazione ha successo, assegna la funzione reale
+    launch_numerical_binary_func = imported_numerical_binary_launch_func
+    NUMERICAL_BINARY_MODULE_LOADED = True
+    print("Modulo Numerical Binary (numerical_binary_module.py) caricato con successo.")
+
+except ImportError as e:
+    # Se il modulo non viene trovato o c'è un errore nell'import
+    print(f"ATTENZIONE: Impossibile importare il modulo 'numerical_binary_module.py'. Errore: {e}")
+    # Definisci una funzione di fallback che mostra solo un errore
+    def fallback_launch_numerical_binary(parent):
+        messagebox.showerror("Errore Modulo",
+                             "Modulo Numerical Binary (numerical_binary_module.py) non trovato o contenente errori.\n"
+                             "Verificare che il file sia presente, corretto e che tutte le sue dipendenze (es. tkcalendar, pandas) siano installate.",
+                             parent=parent)
+    launch_numerical_binary_func = fallback_launch_numerical_binary # Usa la funzione di fallback
+
+except Exception as e_gen:
+    # Per gestire altri errori imprevisti durante l'importazione
+     print(f"ERRORE GENERALE durante l'importazione del modulo Numerical Binary: {e_gen}")
+     print(traceback.format_exc())
+     # Definisci una funzione di fallback anche per errori generici
+     def fallback_launch_numerical_binary_err(parent):
+         messagebox.showerror("Errore Modulo",
+                              f"Errore imprevisto durante il caricamento del modulo Numerical Binary:\n{e_gen}",
+                              parent=parent)
+     launch_numerical_binary_func = fallback_launch_numerical_binary_err
+
+# --- Funzione Helper per Numerical Binary ---
+def open_numerical_binary_helper(parent_window):
+    """Chiama la funzione di lancio del modulo Numerical Binary (reale o fallback)."""
+    print("Tentativo di aprire la finestra Numerical Binary...")
+    if launch_numerical_binary_func: # Controlla se la funzione è stata definita (o è il fallback)
+        try:
+            # Esegui la funzione (passando la finestra principale come genitore)
+            # Questa funzione ora creerà il Toplevel e istanzierà SequenzaSpiaApp
+            launch_numerical_binary_func(parent_window)
+        except Exception as e_launch:
+             # Cattura errori che potrebbero verificarsi durante l'esecuzione della launch function
+             print(f"ERRORE durante l'esecuzione di launch_numerical_binary_func: {e_launch}")
+             print(traceback.format_exc())
+             messagebox.showerror("Errore Esecuzione Modulo",
+                                  f"Si è verificato un errore all'avvio del modulo Numerical Binary:\n{e_launch}",
+                                  parent=parent_window)
+    else:
+        # Questo caso limite non dovrebbe verificarsi se la logica sopra è corretta
+        messagebox.showerror("Errore Interno", "Funzione di avvio per Numerical Binary non definita.", parent=parent_window)
+
 GITHUB_USER = "illottodimax"
 GITHUB_REPO = "Archivio"
 GITHUB_BRANCH = "main"
@@ -222,18 +282,20 @@ def set_seed(seed_value=42):
 set_seed()
    
 def carica_dati_grezzi(ruota):
-    """Carica i dati grezzi da GitHub, gestendo errori."""
+    """
+    Carica i dati grezzi da GitHub, gestendo errori e impedendo
+    che "NA" venga interpretato come NaN. Include debug temporaneo.
+    """
     file_name = FILE_RUOTE.get(ruota)
     if not file_name:
         logger.error(f"Abbreviazione ruota non trovata nel dizionario: {ruota}")
         return None
 
-    # Costruisci l'URL completo per il file raw specifico
     url = f"{BASE_GITHUB_URL.rstrip('/')}/{file_name}"
     logger.info(f"Tentativo di caricamento dati per {ruota} da GitHub URL: {url}")
 
     try:
-        response = requests.get(url, timeout=15) # Timeout di 15 secondi
+        response = requests.get(url, timeout=15)
         response.raise_for_status() # Controlla errori HTTP (404, 500, etc.)
         content = response.text
 
@@ -241,33 +303,76 @@ def carica_dati_grezzi(ruota):
              logger.warning(f"File scaricato da {url} per {ruota} è vuoto o contiene solo spazi.")
              return None
 
+        # --- MODIFICA CRUCIALE PER GESTIRE "NA" ---
         # Usa io.StringIO per leggere la stringa come file
-        df = pd.read_csv(io.StringIO(content), header=None, sep='\t', encoding='utf-8')
+        df = pd.read_csv(
+            io.StringIO(content),
+            header=None,              # Il file non ha header
+            sep='\t',                 # Separatore è tabulazione
+            encoding='utf-8',         # Specifica encoding
+            dtype={1: str},           # Specifica che la colonna 1 (Ruota) dovrebbe essere stringa
+            keep_default_na=False,    # NON interpretare "NA", "NaN" etc. come valori mancanti
+            na_values=['']            # Considera SOLO le stringhe vuote come valori mancanti (opzionale)
+        )
+        # --- FINE MODIFICA ---
+
+        # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+        # (Puoi commentare o rimuovere queste righe dopo aver verificato che funziona)
+        logger.info(f"DEBUG {ruota}: Info DataFrame DOPO lettura con keep_default_na=False:")
+        df_info_str = io.StringIO()
+        df.info(buf=df_info_str)
+        logger.info(f"DEBUG {ruota}:\n{df_info_str.getvalue()}")
+        # === FINE BLOCCO DEBUG TEMPORANEO ===
 
         expected_columns = 7 # Data, Ruota, Num1, Num2, Num3, Num4, Num5
         if df.shape[1] == expected_columns:
+             # Assegna nomi alle colonne
              df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]
-             # Verifica Consistenza Sigla (opzionale ma utile)
+
+             # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+             logger.info(f"DEBUG {ruota}: Valori unici in df['Ruota'] DOPO rinomina colonne: {df['Ruota'].unique()}")
+             # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+             # Verifica Consistenza Sigla
              sigle_nel_file = df['Ruota'].unique()
-             if len(sigle_nel_file) == 1 and sigle_nel_file[0].upper() != ruota.upper():
-                 logger.warning(f"Sigla nel file {file_name} ('{sigle_nel_file[0]}') != chiave usata ('{ruota}').")
-             elif len(sigle_nel_file) > 1:
-                  logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+
+             if sigle_nel_file.size > 0:
+                 # Estrai la prima (e si spera unica) sigla trovata
+                 sigla_letta = sigle_nel_file[0] # Ora DOVREBBE essere la stringa 'NA'
+
+                 # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+                 logger.info(f"DEBUG {ruota}: Valore sigla_letta estratto: {repr(sigla_letta)}") # repr() mostra se è stringa
+                 logger.info(f"DEBUG {ruota}: Tipo sigla_letta estratto: {type(sigla_letta)}")
+                 # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+                 # Confronto sigla (ora dovrebbe funzionare)
+                 if len(sigle_nel_file) == 1 and sigla_letta.upper() != ruota.upper():
+                     logger.warning(f"Sigla nel file {file_name} ('{sigla_letta}') != chiave usata ('{ruota}').")
+                 elif len(sigle_nel_file) > 1:
+                      logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+             else:
+                 logger.warning(f"Nessuna sigla trovata nella colonna 'Ruota' del file {file_name}.")
 
              logger.info(f"Dati caricati e colonne rinominate per {ruota} da GitHub.")
-             return df
+             return df # Restituisce il DataFrame caricato e validato
         else:
+             # Errore se il numero di colonne non è quello atteso
              logger.error(f"Formato colonne inatteso ({df.shape[1]}) in {file_name} da {url}. Attese {expected_columns}.")
-             try: logger.error(f"Prime righe:\n{df.head().to_string()}")
-             except Exception: logger.error("Impossibile mostrare prime righe.")
-             return None
+             try:
+                 # Prova a loggare le prime righe per aiutare nel debug
+                 logger.error(f"Prime righe:\n{df.head().to_string()}")
+             except Exception:
+                 logger.error("Impossibile mostrare prime righe.")
+             return None # Fallimento caricamento
 
+    # Gestione delle eccezioni durante il caricamento o parsing
     except requests.exceptions.Timeout:
         logger.error(f"Timeout (15s) durante connessione a {url} per {ruota}")
         return None
     except requests.exceptions.HTTPError as http_err:
          logger.error(f"Errore HTTP ({http_err.response.status_code}) da {url} per {ruota}: {http_err}")
-         if http_err.response.status_code == 404: logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
+         if http_err.response.status_code == 404:
+             logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
          return None
     except requests.exceptions.RequestException as req_err:
         logger.error(f"Errore di rete/connessione da {url} per {ruota}: {req_err}")
@@ -277,11 +382,27 @@ def carica_dati_grezzi(ruota):
         return None
     except pd.errors.ParserError as e:
         logger.error(f"Errore parsing Pandas del TSV da {url} per {ruota}: {e}")
-        try: logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
-        except NameError: logger.error("Contenuto non disponibile.")
+        try:
+            logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
+        except NameError: # 'content' potrebbe non essere definito se errore avviene prima
+            logger.error("Contenuto non disponibile.")
+        return None
+    except AttributeError as ae: # Cattura specifica per l'errore originale (ora improbabile)
+        sigla_debug = 'Non disponibile'
+        tipo_debug = 'Non disponibile'
+        # Controlla se le variabili esistono prima di accedervi nel log
+        if 'sigle_nel_file' in locals() and sigle_nel_file.size > 0:
+             sigla_debug = repr(sigle_nel_file[0])
+             tipo_debug = type(sigle_nel_file[0])
+        logger.error(f"!!! AttributeError ANCORA PRESENTE? per {ruota} da {url}.")
+        logger.error(f"Valore (sigla_letta): {sigla_debug}, Tipo: {tipo_debug}")
+        logger.exception(f"Dettagli errore (Traceback): {ae}") # Logga lo stack trace
         return None
     except Exception as e:
-        logger.exception(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}: {e}")
+        # Cattura qualsiasi altra eccezione imprevista
+        logger.error(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}:")
+        # Stampa il traceback completo nel log per aiutare a diagnosticare
+        logger.error(traceback.format_exc())
         return None
 
 def preprocessa_dati(df, start_date, end_date):
@@ -1180,6 +1301,7 @@ cache_estrazioni = {}  # Dizionario per memorizzare le estrazioni già caricate
 cache_timestamp = {}   # Per tenere traccia della data dell'ultimo aggiornamento dei file
 ultima_ruota_elaborata = None  # Per tenere traccia dell'ultima ruota elaborata
 num_folds = None  # Verrà inizializzato come IntVar successivamente
+scaler_statistiche_best_fold = None
 
 def carica_dati_multi_ruota(ruote_selezionate, start_date, end_date):
     """
@@ -5731,304 +5853,363 @@ def importa_licenza(parent_window=None):
 
 def carica_e_valuta_modello():
     """
-    Carica il miglior modello salvato per la ruota selezionata e lo valuta.
-    Versione migliorata con gestione robusta degli errori di compatibilità.
+    Carica il miglior modello salvato per la ruota selezionata, prepara i dati
+    correttamente e valuta il modello facendo una predizione.
+    Versione CORRETTA e migliorata.
     """
-    global ultima_ruota_elaborata, numeri_finali
+    global ultima_ruota_elaborata, numeri_finali, ruota_selezionata, textbox, config
+    # Serve global qui per LEGGERE lo scaler salvato da avvia_elaborazione
+    global scaler_statistiche_best_fold
 
-    ruota = ruota_selezionata.get()  # Ottieni la ruota dalla selezione attuale
-    
-    # Se non c'è una ruota selezionata ma c'è un'ultima ruota elaborata, usala
+    ruota = ruota_selezionata.get()
     if not ruota and ultima_ruota_elaborata:
         ruota = ultima_ruota_elaborata
-        # Aggiorna visivamente il pulsante della ruota
+        ruota_selezionata.set(ruota)
         if ruota in pulsanti_ruote:
-            for r in pulsanti_ruote:
-                pulsanti_ruote[r]["bg"] = "SystemButtonFace"  # Reset di tutti i pulsanti
-            pulsanti_ruote[ruota]["bg"] = "lightgreen"  # Evidenzia ruota attualmente in uso
-            ruota_selezionata.set(ruota)  # Imposta la ruota selezionata
-            entry_info.delete(0, tk.END)
-            entry_info.insert(0, f"Ruota: {ruota}, Periodo: {entry_start_date.get_date().strftime('%Y/%m/%d')} - {entry_end_date.get_date().strftime('%Y/%m/%d')}")
-            root.update()
-    
-    # Se ancora non abbiamo una ruota, chiedi all'utente di selezionarne una
-    if not ruota:
-        # Controlla se esistono modelli per qualsiasi ruota
-        modelli_esistenti = []
-        for r in FILE_RUOTE.keys():
-            model_path = f'best_model_{r}.weights.h5'
-            if os.path.exists(model_path):
-                modelli_esistenti.append(r)
-        
-        if modelli_esistenti:
-            # Apri una finestra per selezionare tra i modelli esistenti
-            popup = tk.Toplevel()
-            popup.title("Seleziona Modello")
-            popup.geometry("300x400")
-            
-            tk.Label(popup, text="Modelli disponibili:", font=("Arial", 12, "bold")).pack(pady=10)
-            
-            def seleziona_e_chiudi(r):
-                global ultima_ruota_elaborata
-                ultima_ruota_elaborata = r
-                ruota_selezionata.set(r)
-                for btn in pulsanti_ruote.values():
-                    btn["bg"] = "SystemButtonFace"
-                pulsanti_ruote[r]["bg"] = "lightgreen"
-                entry_info.delete(0, tk.END)
-                entry_info.insert(0, f"Ruota: {r}, Periodo: {entry_start_date.get_date().strftime('%Y/%m/%d')} - {entry_end_date.get_date().strftime('%Y/%m/%d')}")
-                popup.destroy()
-                # Richiama la funzione dopo la chiusura
-                root.after(100, carica_e_valuta_modello)
-            
-            for r in modelli_esistenti:
-                btn = tk.Button(
-                    popup,
-                    text=f"Ruota {r}",
-                    command=lambda ruota=r: seleziona_e_chiudi(ruota),
-                    bg="#ADD8E6",
-                    width=20,
-                    height=2
-                )
-                btn.pack(pady=5)
-            
-            # Pulsante per annullare
-            tk.Button(
-                popup,
-                text="Annulla",
-                command=popup.destroy,
-                bg="#FF6B6B",
-                width=20
-            ).pack(pady=10)
-            
-            return
-        else:
-            messagebox.showwarning("Attenzione", "Nessun modello salvato trovato. Seleziona una ruota e addestra un modello prima.")
-            return
+            for r_btn in pulsanti_ruote.values(): r_btn["bg"] = "SystemButtonFace"
+            pulsanti_ruote[ruota]["bg"] = "lightgreen"
+        if 'entry_info' in globals() and entry_info:
+             try:
+                 start_date_str = entry_start_date.get_date().strftime('%Y/%m/%d')
+                 end_date_str = entry_end_date.get_date().strftime('%Y/%m/%d')
+                 entry_info.delete(0, tk.END)
+                 entry_info.insert(0, f"Ruota: {ruota}, Periodo: {start_date_str} - {end_date_str}")
+             except Exception as e_date_info: logger.warning(f"Errore aggiornamento entry_info: {e_date_info}")
+        if 'root' in globals() and root: root.update()
+    elif not ruota:
+        messagebox.showwarning("Attenzione", "Seleziona una ruota o esegui prima un'elaborazione.")
+        return
 
-    # Pulisci la textbox
+    # --- Determina il percorso corretto del modello DA CARICARE ---
+    try:
+        model_type_to_load = getattr(config, 'model_type', 'dense') # Default a 'dense' se non specificato
+        model_path = f'best_model_{ruota}_{model_type_to_load}.weights.h5' # <-- NOME CORRETTO
+    except Exception as e:
+        messagebox.showerror("Errore Interno", f"Impossibile determinare il percorso del modello: {e}")
+        logger.error(f"Errore nel determinare model_path: {e}", exc_info=True)
+        return
+
     textbox.delete(1.0, tk.END)
-    textbox.insert(tk.END, f"Tentativo di caricamento del modello per {ruota}...\n")
+    textbox.insert(tk.END, f"Tentativo caricamento modello '{os.path.basename(model_path)}' per ruota {ruota}...\n")
+    textbox.insert(tk.END, f"(Utilizzando configurazione modello ATTUALE: tipo={model_type_to_load})\n")
+    textbox.insert(tk.END, "Assicurati che i parametri Modello/Avanzate corrispondano a quelli del salvataggio.\n")
     textbox.update()
 
-    # Ottieni le date per il caricamento dati
-    try:
-        start_date = pd.to_datetime(entry_start_date.get_date(), format='%Y/%m/%d')
-        end_date = pd.to_datetime(entry_end_date.get_date(), format='%Y/%m/%d')
-    except ValueError:
-        messagebox.showerror("Errore", "Formato data non valido. Usa YYYY/MM/DD.")
+    # --- Verifica Esistenza File Modello (Percorso Corretto) ---
+    if not os.path.exists(model_path):
+        alt_model_type = 'lstm' if model_type_to_load == 'dense' else 'dense'
+        alt_model_path = f'best_model_{ruota}_{alt_model_type}.weights.h5'
+        alt_exists = os.path.exists(alt_model_path)
+
+        msg = f"File modello '{os.path.basename(model_path)}' NON trovato.\n\n"
+        if alt_exists:
+            msg += f"Esiste però un modello di tipo '{alt_model_type}' ({os.path.basename(alt_model_path)}).\n"
+            msg += f"CAMBIA il 'Tipo di Modello' nelle impostazioni e riprova a caricare, oppure...\n\n"
+        msg += f"Vuoi addestrare un nuovo modello ({model_type_to_load}) per la ruota {ruota} ora?"
+
+        risposta = messagebox.askyesno("Modello Non Trovato", msg)
+        if risposta:
+            avvia_elaborazione() # Chiama la funzione di training
         return
 
-    # Carica i dati per preparare input/output shape
-    data = carica_dati(ruota, start_date, end_date)
-    if data is None:
-        messagebox.showerror("Errore", f"Impossibile caricare i dati per la ruota {ruota}.")
-        return
-    
-    X, y, scaler, raw_data = data
-    
-    if len(X) == 0 or len(y) == 0:
-        messagebox.showerror("Errore", "Dataset vuoto per il periodo specificato.")
-        return
-    
-    # Definisci il percorso del modello
-    model_path = f'best_model_{ruota}.weights.h5'
-    
-    # Verifica se il file esiste
-    if not os.path.exists(model_path):
-        risposta = messagebox.askyesno("Attenzione", 
-                               f"File modello '{model_path}' non trovato.\n"
-                               f"Desideri addestrare un nuovo modello per la ruota {ruota}?")
-        if risposta:
-            avvia_elaborazione()
-        return
-    
-    # Definisci input_shape e output_shape
-    input_shape = (X.shape[1],)
-    output_shape = y.shape[1]
-    
-    # Messagebox per chiedere se si vuole riaddestrare il modello
-    risposta = messagebox.askyesno("Caricamento modello", 
-                           "Il caricamento di modelli salvati può generare errori di compatibilità.\n"
-                           "Desideri provare a caricare il modello esistente o preferisci addestrare un nuovo modello?",
-                           detail="Sì = Carica modello esistente, No = Addestra nuovo modello")
-    
-    if not risposta:
-        avvia_elaborazione()
-        return
-    
-    # Tenta di caricare il modello esistente
+    # --- Fase 1: Caricamento e Preparazione Dati (Replicando pipeline di avvia_elaborazione) ---
+    all_features_df = None # Inizializza
+    num_total_features_per_step = 0
+    num_stat_features = 0
+    feature_names = []
     try:
-        textbox.insert(tk.END, "Creazione di un nuovo modello con la stessa struttura...\n")
+        logger.info(f"Inizio preparazione dati per {ruota} (per caricamento modello)...")
+        start_date = pd.to_datetime(entry_start_date.get_date())
+        end_date = pd.to_datetime(entry_end_date.get_date())
+
+        df_grezzo = carica_dati_grezzi(ruota)
+        if df_grezzo is None: raise ValueError("Caricamento dati grezzi fallito.")
+        df_preproc = preprocessa_dati(df_grezzo, start_date, end_date)
+        if df_preproc is None or df_preproc.empty: raise ValueError("Nessun dato nel periodo specificato.")
+        numeri = estrai_numeri(df_preproc)
+        if numeri is None: raise ValueError("Estrazione numeri fallita.")
+
+        sequence_length = 10 # Deve corrispondere a quella usata in avvia_elaborazione
+
+        # Controllo dati minimi PRIMA di creare feature
+        min_samples_needed_base = 15 # Minimo per feature/stats sensate
+        min_samples_needed_seq = sequence_length + min_samples_needed_base if model_type_to_load == 'lstm' else min_samples_needed_base
+        if len(numeri) < min_samples_needed_seq:
+            raise ValueError(f"Dati insufficienti ({len(numeri)} campioni) nel periodo scelto per creare le feature necessarie "
+                             f"(tipo={model_type_to_load}, seq_len={sequence_length}). Minimo richiesto: {min_samples_needed_seq}. Estendi il periodo.")
+
+        # Feature Temporali
+        df_temp_reset = df_preproc.reset_index()
+        df_con_feature_temp_reset = aggiungi_feature_temporali(df_temp_reset)
+        df_con_feature_temp = df_con_feature_temp_reset.set_index('Data')
+        temporal_features_df = df_con_feature_temp[['giorno_sett_sin', 'giorno_sett_cos', 'mese_sin', 'mese_cos', 'giorno_mese_sin', 'giorno_mese_cos']]
+
+        # Feature Statistiche
+        stats_features_all = aggiungi_statistiche_numeri(numeri, finestra=10)
+        if stats_features_all is None: raise ValueError("Calcolo feature statistiche fallito.")
+        num_stat_features = stats_features_all.shape[1] if stats_features_all.ndim == 2 and stats_features_all.size > 0 else 0
+        logger.info(f"Numero feature statistiche create: {num_stat_features}")
+
+        # Combinazione Feature
+        all_features_df = pd.DataFrame(numeri, index=df_preproc.index, columns=[f'Num{i}' for i in range(1, 6)])
+        all_features_df = pd.concat([all_features_df, temporal_features_df], axis=1)
+        if num_stat_features > 0:
+            stat_col_names = [f'Stat_{i+1}' for i in range(num_stat_features)]
+            stats_df = pd.DataFrame(stats_features_all, index=df_preproc.index, columns=stat_col_names)
+            all_features_df = pd.concat([all_features_df, stats_df], axis=1)
+
+        initial_len = len(all_features_df)
+        all_features_df.dropna(inplace=True)
+        final_len = len(all_features_df)
+        logger.info(f"Righe dopo dropna: {final_len} (rimosse: {initial_len - final_len})")
+        if all_features_df.empty: raise ValueError("Dataset vuoto dopo preparazione feature e dropna.")
+
+        num_total_features_per_step = all_features_df.shape[1]
+        feature_names = all_features_df.columns.tolist()
+        logger.info(f"Preparazione dati completata. Feature totali: {num_total_features_per_step}")
+        textbox.insert(tk.END, f"Preparazione dati completata ({final_len} campioni, {num_total_features_per_step} feature).\n")
         textbox.update()
-        
-        # Crea un nuovo modello
-        model = build_model(input_shape, output_shape, config.dense_layers, config.dropout_rates)
-        
-        # Compila il modello
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-        if config.use_custom_loss:
-            model.compile(optimizer=optimizer, loss=custom_loss_function, metrics=["mae"])
-        else:
-            loss_function = config.loss_function_choice if config.loss_function_choice else "mean_squared_error"
-            model.compile(optimizer=optimizer, loss=loss_function, metrics=["mae"])
-        
-        textbox.insert(tk.END, "Modello creato. Tentativo di caricamento pesi...\n")
-        textbox.update()
-        
-        loading_success = False
-        
-        # APPROCCIO 1: Prova a riaddestrate il modello con pochi dati
+
+    except Exception as data_prep_err:
+        error_msg = f"Errore durante la preparazione dei dati per caricare il modello:\n{data_prep_err}"
+        messagebox.showerror("Errore Preparazione Dati", f"{error_msg}\n\n{traceback.format_exc()}")
+        logger.error(error_msg, exc_info=True)
+        return
+
+    # --- Fase 2: Ricostruzione Modello e Caricamento Pesi ---
+    model = None
+    try:
+        # Determina input_shape corretto in base al tipo di modello DA CARICARE
+        if model_type_to_load == 'lstm':
+            # Ricontrolla dati minimi per creare ALMENO UNA sequenza
+            if len(all_features_df) <= sequence_length:
+                 raise ValueError(f"Dati insuff. ({len(all_features_df)}) per creare input LSTM (richiesti > {sequence_length})")
+            input_shape_for_model = (sequence_length, num_total_features_per_step)
+        else: # Dense
+             if len(all_features_df) < 1: # Deve esserci almeno un campione
+                 raise ValueError("Dati insufficienti (<1 campione) per input Dense.")
+             input_shape_for_model = (num_total_features_per_step,)
+
+        output_shape = 5 # Numero di output (Num1-Num5)
+
+        textbox.insert(tk.END, f"Ricostruzione architettura modello ({model_type_to_load})...\n"); textbox.update()
+        logger.info(f"Ricostruzione architettura {model_type_to_load} con input_shape={input_shape_for_model}")
+
+        # Usa la configurazione CORRENTE dalla GUI (l'utente deve assicurarsi che corrisponda)
+        # Recupera i valori dalle entry/variabili Tkinter
+        dense_layers_cfg = [int(x.get()) for x in [entry_neurons_layer1, entry_neurons_layer2, entry_neurons_layer3] if x.get().isdigit() and int(x.get()) > 0] or [128, 64] # Usa i valori dai widget Entry
+        dropout_rates_cfg = [float(x.get()) for x in [entry_dropout_layer1, entry_dropout_layer2, entry_dropout_layer3] if x.get().replace('.', '', 1).isdigit() and 0 <= float(x.get()) < 1]
+        # Assicura coerenza lunghezze
+        if len(dropout_rates_cfg) < len(dense_layers_cfg): dropout_rates_cfg.extend([0.3]*(len(dense_layers_cfg)-len(dropout_rates_cfg)))
+        elif len(dropout_rates_cfg) > len(dense_layers_cfg): dropout_rates_cfg = dropout_rates_cfg[:len(dense_layers_cfg)]
+
+        # Costruisci il modello
+        model = build_model(input_shape_for_model, output_shape, dense_layers_cfg, dropout_rates_cfg)
+
+        # Compila (necessario prima di load_weights o predict)
+        # Recupera le scelte dalle variabili/config globali
+        optimizer_choice = getattr(config, 'optimizer_choice', 'adam').lower()
+        lr = 0.001 # LR base, non critico solo per caricare/predire
+        if optimizer_choice == 'adam': optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
+        elif optimizer_choice == 'rmsprop': optimizer = tf.keras.optimizers.RMSprop(learning_rate=lr)
+        elif optimizer_choice == 'sgd': optimizer = tf.keras.optimizers.SGD(learning_rate=lr)
+        else: optimizer = tf.keras.optimizers.Adam(learning_rate=lr)
+
+        if getattr(config, 'use_custom_loss', False): loss_func = custom_loss_function
+        else: loss_func = getattr(config, 'loss_function_choice', 'mean_squared_error')
+
+        # Assicurati che la loss function sia valida per Keras
+        if isinstance(loss_func, str) and loss_func not in ['mean_squared_error', 'mean_absolute_error', 'huber', 'logcosh']: # Aggiungi altre loss stringa valide se necessario
+            logger.warning(f"Loss function string '{loss_func}' non standard per Keras, usando 'mean_squared_error' come fallback.")
+            loss_func = 'mean_squared_error'
+        elif not isinstance(loss_func, (str, tf.keras.losses.Loss)) and not callable(loss_func):
+             logger.warning(f"Loss function type '{type(loss_func)}' non valido, usando 'mean_squared_error' come fallback.")
+             loss_func = 'mean_squared_error'
+
+        model.compile(optimizer=optimizer, loss=loss_func, metrics=["mae"])
+        logger.info(f"Modello ricostruito e compilato (Loss: {getattr(loss_func,'__name__', str(loss_func))}, Opt: {optimizer_choice}).")
+
+        # Carica i pesi dal file corretto
+        textbox.insert(tk.END, f"Caricamento pesi da '{os.path.basename(model_path)}'...\n"); textbox.update()
         try:
-            textbox.insert(tk.END, "STRATEGIA: Riaddestramento veloce su dati recenti...\n")
-            textbox.update()
-            
-            # Usa gli ultimi 20% dei dati per un rapido riaddestramento
-            split_idx = int(len(X) * 0.8)
-            X_train, X_val = X[split_idx:], X[:split_idx]
-            y_train, y_val = y[split_idx:], y[:split_idx]
-            
-            # Addestra il modello per poche epoche
-            history = model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=5,  # Poche epoche per un riaddestramento veloce
-                batch_size=32,
-                verbose=0
-            )
-            
-            textbox.insert(tk.END, "✓ Modello riaddestrato con successo su dati recenti.\n")
-            textbox.update()
-            loading_success = True
-            
-            # Usa l'ultimo campione per la predizione
-            X_pred = X[-1:].copy()
-            y_pred = model.predict(X_pred)
-            textbox.insert(tk.END, f"DEBUG - Predizione grezza: {y_pred}\n")
-            
-        # Se l'addestramento fallisce, prova a caricare il modello esistente
-        except Exception as e:
-            textbox.insert(tk.END, f"✗ Riaddestramento fallito: {str(e)}\n")
-            textbox.insert(tk.END, "STRATEGIA: Tentativo caricamento modello esistente...\n")
-            textbox.update()
-            
-            # Tenta di caricare il modello esistente, con gestione esplicita degli errori
-            try:
-                model = Sequential()
-                model.add(Dense(512, activation='relu', input_shape=input_shape))
-                model.add(BatchNormalization())
-                model.add(Dropout(0.3))
-                model.add(Dense(256, activation='relu'))
-                model.add(BatchNormalization())
-                model.add(Dropout(0.3))
-                model.add(Dense(128, activation='relu'))
-                model.add(BatchNormalization())
-                model.add(Dropout(0.3))
-                model.add(Dense(output_shape))
-                model.compile(optimizer='adam', loss='mse')
-                
-                model.load_weights(model_path, skip_mismatch=True)  # Prova con skip_mismatch=True
-                textbox.insert(tk.END, "✓ Modello caricato con successo (skip_mismatch).\n")
-                loading_success = True
-                
-                # Usa l'ultimo campione per la predizione
-                X_pred = X[-1:].copy()
-                y_pred = model.predict(X_pred)
-                textbox.insert(tk.END, f"DEBUG - Predizione grezza: {y_pred}\n")
-                
-            except Exception as e2:
-                textbox.insert(tk.END, f"✗ Caricamento fallito: {str(e2)}\n")
-                textbox.insert(tk.END, "STRATEGIA FINALE: Addestramento modello semplificato...\n")
-                textbox.update()
-                
-                # Crea un modello semplificato
-                model = Sequential()
-                model.add(Dense(64, activation='relu', input_shape=input_shape))
-                model.add(Dense(32, activation='relu'))
-                model.add(Dense(output_shape))
-                model.compile(optimizer='adam', loss='mse')
-                
-                # Addestra il modello semplificato
-                model.fit(X, y, epochs=10, batch_size=32, verbose=0)
-                textbox.insert(tk.END, "✓ Modello semplificato addestrato con successo.\n")
-                loading_success = True
-                
-                # Usa l'ultimo campione per la predizione
-                X_pred = X[-1:].copy()
-                y_pred = model.predict(X_pred)
-                textbox.insert(tk.END, f"DEBUG - Predizione grezza: {y_pred}\n")
-        
-        # Denormalizza i risultati
+            model.load_weights(model_path) # *** NON USARE skip_mismatch ***
+            textbox.insert(tk.END, "✓ Pesi caricati con successo!\n"); textbox.update()
+            logger.info(f"Pesi caricati con successo da {model_path}")
+        except ValueError as ve:
+             # Errore comune per mismatch architettura
+             error_msg = (f"ERRORE: Impossibile caricare i pesi.\n"
+                          f"L'architettura del modello ATTUALE (basata sulle impostazioni GUI: layers={dense_layers_cfg}, dropout={dropout_rates_cfg}, tipo={model_type_to_load}, etc.) "
+                          f"non corrisponde a quella salvata in '{os.path.basename(model_path)}'.\n\n"
+                          f"Dettagli: {ve}\n\n"
+                          f"SOLUZIONE:\n1. Reimposta i parametri 'Modello'/'Avanzate' a quelli usati "
+                          f"durante l'addestramento originale.\n2. OPPURE riaddestra il modello con 'Avvia Elaborazione'.")
+             messagebox.showerror("Errore Caricamento Pesi", error_msg)
+             logger.error(f"Errore ValueError durante load_weights: {ve}", exc_info=True)
+             return # Esce perché il caricamento è fallito
+        except Exception as load_err:
+            error_msg = f"Errore generico durante il caricamento dei pesi:\n{load_err}"
+            messagebox.showerror("Errore Caricamento Pesi", f"{error_msg}\n\n{traceback.format_exc()}")
+            logger.error(f"Errore generico durante load_weights: {load_err}", exc_info=True)
+            return # Esce
+
+    except Exception as model_build_err:
+        error_msg = f"Errore durante la ricostruzione/compilazione del modello:\n{model_build_err}"
+        messagebox.showerror("Errore Costruzione Modello", f"{error_msg}\n\n{traceback.format_exc()}")
+        logger.error(error_msg, exc_info=True)
+        return
+
+    # --- Fase 3: Predizione Finale con Dati Preparati e Scaler Corretto ---
+    try:
+        textbox.insert(tk.END, "Preparazione input per la predizione...\n"); textbox.update()
+
+        # Prepara l'input per la predizione usando l'ULTIMO campione/sequenza dai dati PREPARATI
+        X_pred_input_final_scaled = None
+        if model_type_to_load == 'lstm':
+            # Estrai l'ultima sequenza necessaria dai dati preparati
+            last_sequence_features = all_features_df.iloc[-sequence_length:].values
+            if last_sequence_features.shape[0] != sequence_length: # Controllo robustezza
+                raise ValueError(f"Ultima sequenza per LSTM ha lunghezza errata ({last_sequence_features.shape[0]} invece di {sequence_length}).")
+
+            # Scala la sequenza
+            X_pred_seq_scaled = last_sequence_features.copy().astype(float)
+            X_pred_seq_scaled[:, :5] /= 90.0 # Scala numeri (colonne 0-4)
+
+            if num_stat_features > 0:
+                start_stat_idx = 11 # Indice inizio feature statistiche (Num1-5 + 6 Temp = 11)
+                stats_to_scale = X_pred_seq_scaled[:, start_stat_idx:]
+                if stats_to_scale.shape[1] != num_stat_features:
+                    raise ValueError(f"Numero colonne statistiche estratte ({stats_to_scale.shape[1]}) != atteso ({num_stat_features})")
+
+                if scaler_statistiche_best_fold: # Usa lo scaler salvato da avvia_elaborazione
+                    logger.info("Utilizzo scaler statistiche salvato dal miglior fold.")
+                    stats_flat = stats_to_scale.reshape(-1, num_stat_features)
+                    scaled_stats_flat = scaler_statistiche_best_fold.transform(stats_flat)
+                    X_pred_seq_scaled[:, start_stat_idx:] = scaled_stats_flat.reshape(sequence_length, num_stat_features)
+                else:
+                    # Fallback: avvisa e riallena scaler temporaneo (meno ideale)
+                    logger.warning("Scaler statistiche best fold non trovato in memoria. Riallenerò uno scaler temporaneo solo sull'input di predizione (potrebbe essere meno accurato).")
+                    textbox.insert(tk.END, "WARN: Scaler statistiche non trovato, riallenamento temporaneo...\n")
+                    temp_scaler = MinMaxScaler()
+                    stats_flat = stats_to_scale.reshape(-1, num_stat_features)
+                    scaled_stats_flat = temp_scaler.fit_transform(stats_flat) # FIT_TRANSFORM qui
+                    X_pred_seq_scaled[:, start_stat_idx:] = scaled_stats_flat.reshape(sequence_length, num_stat_features)
+
+            X_pred_input_final_scaled = np.expand_dims(X_pred_seq_scaled, axis=0)
+
+        else: # Dense
+            # Estrai l'ultimo campione
+            last_sample_features = all_features_df.iloc[-1].values
+            if last_sample_features.shape[0] != num_total_features_per_step: # Controllo robustezza
+                 raise ValueError(f"Ultimo campione per Dense ha numero feature errato ({last_sample_features.shape[0]} invece di {num_total_features_per_step}).")
+
+            # Scala il campione
+            X_pred_flat_scaled = last_sample_features.copy().astype(float)
+            X_pred_flat_scaled[:5] /= 90.0 # Scala numeri (indici 0-4)
+
+            if num_stat_features > 0:
+                start_stat_idx = 11 # Indice inizio feature statistiche
+                stats_to_scale = X_pred_flat_scaled[start_stat_idx:]
+                if len(stats_to_scale) != num_stat_features:
+                    raise ValueError(f"Numero feature statistiche estratte ({len(stats_to_scale)}) != atteso ({num_stat_features})")
+
+                if scaler_statistiche_best_fold: # Usa lo scaler salvato
+                    logger.info("Utilizzo scaler statistiche salvato dal miglior fold.")
+                    scaled_stats = scaler_statistiche_best_fold.transform(stats_to_scale.reshape(1, -1))
+                    X_pred_flat_scaled[start_stat_idx:] = scaled_stats.flatten()
+                else:
+                    # Fallback
+                    logger.warning("Scaler statistiche best fold non trovato in memoria. Riallenerò uno scaler temporaneo solo sull'input di predizione.")
+                    textbox.insert(tk.END, "WARN: Scaler statistiche non trovato, riallenamento temporaneo...\n")
+                    temp_scaler = MinMaxScaler()
+                    scaled_stats = temp_scaler.fit_transform(stats_to_scale.reshape(1, -1)) # FIT_TRANSFORM qui
+                    X_pred_flat_scaled[start_stat_idx:] = scaled_stats.flatten()
+
+            X_pred_input_final_scaled = np.expand_dims(X_pred_flat_scaled, axis=0)
+
+        # --- Esegui la predizione ---
+        textbox.insert(tk.END, "Esecuzione predizione con modello caricato...\n"); textbox.update()
+        logger.info(f"Shape input predizione finale: {X_pred_input_final_scaled.shape}")
+        predizione_scaled = model.predict(X_pred_input_final_scaled)[0]
+
+        # --- Denormalizza e processa i risultati ---
+        numeri_denormalizzati = predizione_scaled * 90.0 # Corretto perché il target nel training era scalato /90
+        numeri_interi_predetti_raw = np.round(numeri_denormalizzati).astype(int)
+        numeri_interi_predetti = np.clip(numeri_interi_predetti_raw, 1, 90).tolist() # Da 1 a 90, converti a lista python
+
+        textbox.insert(tk.END, f"Numeri interi predetti grezzi: {numeri_interi_predetti}\n"); textbox.update()
+        logger.info(f"Numeri interi predetti (grezzi, modello caricato): {numeri_interi_predetti}")
+
+        # --- Genera numeri finali suggeriti ---
+        # Usa una stima di attendibilità perché non abbiamo la history di questo modello specifico
+        attendibility_score_est = 65.0 # Stima media, potresti provare a caricarla da un file se la salvi
+        commento_est = "Attendibilità Stimata (modello caricato)"
+        numeri_frequenti = estrai_numeri_frequenti(ruota, start_date, end_date, n=20)
+
+        # Usa la funzione _modificata
+        numeri_finali, origine_ml = genera_numeri_attendibili_modificata(
+            np.array(numeri_interi_predetti), # Assicurati sia array se la funzione lo richiede
+            attendibility_score_est,
+            numeri_frequenti
+        )
+
+        textbox.insert(tk.END, f"\n--- Risultati Modello Caricato ({ruota} - {model_type_to_load}) ---\n")
+        textbox.insert(tk.END, f"Attendibilità: ~{attendibility_score_est:.1f}/100 ({commento_est})\n")
+        textbox.insert(tk.END, "Numeri Consigliati: " + ", ".join(map(str, numeri_finali)) + "\n")
+        logger.info(f"Numeri finali suggeriti (modello caricato): {numeri_finali}")
+
+        # Mostra popup
+        mostra_numeri_forti_popup(numeri_finali, attendibility_score_est, origine_ml)
+
+        # (Opzionale) Visualizzazione Accuratezza
         try:
-            if not loading_success:
-                raise ValueError("Nessun modello caricato con successo. Impossibile procedere con la predizione.")
-                
-            # Correggi la denormalizzazione in base a come è stata fatta la normalizzazione
-            # Se i dati sono stati normalizzati dividendo per 90 durante l'addestramento:
-            numeri_denormalizzati = y_pred * 90.0
-            textbox.insert(tk.END, f"DEBUG - Numeri denormalizzati: {numeri_denormalizzati}\n")
-            
-            # Alternativa: usa lo scaler direttamente se è quello usato nell'addestramento
-            # numeri_denormalizzati = scaler.inverse_transform(y_pred)
-            
-            numeri_interi = np.round(numeri_denormalizzati).astype(int)
-            numeri_interi = np.clip(numeri_interi, 1, 90)  # Assicura numeri tra 1 e 90
-            textbox.insert(tk.END, f"DEBUG - Numeri interi dopo arrotondamento: {numeri_interi}\n")
-            
-            # Estrazione dei numeri frequenti
-            numeri_frequenti = estrai_numeri_frequenti(ruota, start_date, end_date, n=20)
-            textbox.insert(tk.END, f"DEBUG - Numeri frequenti: {numeri_frequenti[:5]}...\n")
-            
-            # Calcola attendibilità in modo più robusto
-            try:
-                attendibility_score, commento = valuta_attendibilita(history.history)
-            except Exception:
-                # Fallback se la valutazione fallisce
-                attendibility_score = 60.0
-                commento = "Previsione attendibile (stima)"
-                
-            textbox.insert(tk.END, f"DEBUG - Attendibilità calcolata: {attendibility_score}\n")
-            
-            # Genera numeri finali con controllo
-            numeri_finali, origine_ml = genera_numeri_attendibili(numeri_interi, attendibility_score, numeri_frequenti)
-            textbox.insert(tk.END, f"DEBUG - Numeri finali generati: {numeri_finali}\n")
-            
-            textbox.insert(tk.END, f"\nRisultati per la ruota {ruota}:\n")
-            textbox.insert(tk.END, f"Attendibilità: {attendibility_score:.1f}/100 - {commento}\n")
-            textbox.insert(tk.END, "Numeri consigliati: " + ", ".join(map(str, numeri_finali)) + "\n")
-            
-            # Visualizza il popup con i numeri forti
-            mostra_numeri_forti_popup(numeri_finali, attendibility_score, origine_ml)
-            
-            # Se possibile, mostra anche metriche di accuratezza
-            if len(y) > 0:
-                try:
-                    # Usa la stessa logica di denormalizzazione usata sopra
-                    y_scaled = y / 90.0  # Normalizza allo stesso modo del training
-                    y_denormalized = y  # I dati originali non normalizzati
-                    
-                    if len(y_denormalized.shape) > 1:
-                        y_denormalized_last = y_denormalized[-1]
-                    else:
-                        y_denormalized_last = y_denormalized
-                    
-                    visualizza_accuratezza(y_denormalized_last, numeri_interi[0], numeri_finali)
-                    accuracy_metrics_0 = valuta_accuratezza_previsione(y_denormalized_last, numeri_interi[0], tolerance=0)
-                    
-                    textbox.insert(tk.END, "\n=== METRICHE DI ACCURATEZZA ===\n")
-                    textbox.insert(tk.END, f"MAE: {accuracy_metrics_0['MAE']:.4f}\n")
-                    textbox.insert(tk.END, f"Media numeri corretti: {accuracy_metrics_0['Media_numeri_corretti_per_estrazione']:.2f}\n")
-                except Exception as e:
-                    textbox.insert(tk.END, f"\nErrore nel calcolo delle metriche: {str(e)}\n")
-                    
-        except Exception as e:
-            textbox.insert(tk.END, f"\nErrore nella denormalizzazione o predizione: {str(e)}\n")
-            textbox.insert(tk.END, "Si consiglia di addestrare un nuovo modello.\n")
-            
-    except Exception as e:
-        textbox.insert(tk.END, f"\nErrore generale: {str(e)}\n")
-        textbox.insert(tk.END, "Si consiglia di addestrare un nuovo modello.\n")
-        messagebox.showerror("Errore", f"Errore generale: {str(e)}")
+            # Prendi i target REALI dell'ultimo campione/sequenza dai dati preparati
+            if model_type_to_load == 'lstm':
+                # L'ultimo target corrisponde all'input [-1]
+                 y_true_last = all_features_df[[f'Num{i}' for i in range(1, 6)]].iloc[-1].values
+            else: # Dense
+                # Il target y[-1] corrisponde all'input X[-1]
+                y_true_last = all_features_df[[f'Num{i}' for i in range(1, 6)]].iloc[-1].values
+
+            if y_true_last is not None and len(y_true_last) == 5:
+                 logger.info("Tentativo visualizzazione accuratezza per l'ultimo punto.")
+                 visualizza_accuratezza(y_true_last, numeri_interi_predetti, numeri_finali) # Passa predizione grezza (arrotondata)
+                 # Calcola e mostra metriche base
+                 metrics = valuta_accuratezza_previsione(y_true_last, numeri_interi_predetti, tolerance=0)
+                 textbox.insert(tk.END, "\nAccuratezza (vs ultimo dato reale):\n")
+                 textbox.insert(tk.END, f"  MAE: {metrics.get('MAE', 'N/A'):.2f}\n")
+                 textbox.insert(tk.END, f"  Numeri esatti: {metrics.get('Media_numeri_corretti_per_estrazione', 'N/A'):.2f}\n")
+            else:
+                 logger.warning("Impossibile ottenere l'ultimo target reale per visualizzazione accuratezza.")
+
+        except Exception as e_vis:
+            logger.warning(f"Errore durante visualizzazione accuratezza (modello caricato): {e_vis}")
+            textbox.insert(tk.END, f"\nWarning: Errore visualizzazione accuratezza: {e_vis}\n")
+
+        ultima_ruota_elaborata = ruota # Aggiorna ultima ruota
+
+    except Exception as predict_err:
+        error_msg = f"Errore durante la fase di predizione finale:\n{predict_err}"
+        messagebox.showerror("Errore Predizione", f"{error_msg}\n\n{traceback.format_exc()}")
+        logger.error(error_msg, exc_info=True)
+        textbox.insert(tk.END, f"\nERRORE Predizione: {error_msg}\n")
+
+    finally:
+        # Pulizia memoria
+        if model is not None: del model
+        K.clear_session()
+        gc.collect()
+        logger.info("Pulizia sessione Keras dopo caricamento/predizione.")
+        # Riabilita UI (spostato da avvia_elaborazione se necessario)
+        try:
+             if 'btn_start' in globals() and btn_start.winfo_exists():
+                 btn_start.config(text=f"AVVIA ELABORAZIONE ({ruota})", state="normal", bg="#4CAF50")
+             for rb in pulsanti_ruote.values():
+                  if rb.winfo_exists(): rb.config(state="normal")
+             if 'root' in globals() and root.winfo_exists(): root.update()
+        except Exception as e_ui_final: logger.warning(f"Errore riabilitazione UI finale: {e_ui_final}")
+
+    textbox.insert(tk.END, "\n--- Caricamento e Valutazione Completati ---")
+    textbox.see(tk.END)
 def toggle_adaptive_noise():
     """Attiva/disattiva l'aggiunta di rumore adattivo."""
     config.adaptive_noise = not config.adaptive_noise
@@ -6228,6 +6409,7 @@ def avvia_elaborazione():
     """
     global numeri_finali, progress_bar, fold_performances, ultima_ruota_elaborata, num_folds, ruota_selezionata, textbox, btn_start, root, pulsanti_ruote, config, logger
     global scaler_statistiche_best_fold # Necessario per la predizione finale
+    global scaler_statistiche_best_fold
 
     # --- 1. Pulizia Sessione e Configurazione Iniziale ---
     try:
@@ -6647,8 +6829,9 @@ def avvia_elaborazione():
                     best_val_loss = val_loss
                     best_model = model_fold # Salva il riferimento al modello Keras di QUESTO fold
                     # Salva lo scaler di QUESTO fold (solo se ci sono feature statistiche)
-                    if num_stat_features > 0:
+                    if num_stat_features > 0 and scaler_statistiche_fold:
                          scaler_statistiche_best_fold = scaler_statistiche_fold # Salva istanza scaler fittato
+                         logger.info(f"*** Scaler statistiche del Fold {fold_idx+1} salvato in memoria. ***")
                     else:
                          scaler_statistiche_best_fold = None
                     logger.info(f"*** Nuovo best model trovato nel Fold {fold_idx+1}, Val Loss: {best_val_loss:.4f} ***")
@@ -7183,6 +7366,80 @@ def esegui_script_legge_terzo():
     except FileNotFoundError:
         print("Errore: Python non trovato. Assicurati che Python sia installato e disponibile nel PATH.")
 
+def lancia_spie_dec():
+    """
+    Lancia lo script esterno ratiod.py.
+    """
+    script_name = "ratiod.py"
+    try:
+        print(f"Tentativo di lanciare: {sys.executable} {script_name}")
+        process = subprocess.Popen([sys.executable, script_name])
+        print(f"Script {script_name} lanciato con PID: {process.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name} non è stato trovato.")
+        messagebox.showerror("Errore", f"Script {script_name} non trovato!\nAssicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name}:\n{e}")
+
+# --- Funzione per il SECONDO nuovo pulsante (Spie Quind) ---
+def lancia_spie_quind():
+    """
+    Lancia lo script esterno ratioq.py.
+    """
+    script_name = "ratioq.py" # Nome dello script cambiato
+    try:
+        print(f"Tentativo di lanciare: {sys.executable} {script_name}")
+        process = subprocess.Popen([sys.executable, script_name])
+        print(f"Script {script_name} lanciato con PID: {process.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name} non è stato trovato.")
+        messagebox.showerror("Errore", f"Script {script_name} non trovato!\nAssicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name}:\n{e}")
+
+def lancia_ritardi_plus():  # <<< IL NOME È ESATTAMENTE QUESTO
+    """
+    Lancia lo script esterno ritardi_plus_analyzer.py usando subprocess.
+    """
+    script_name = "ritardi_plus_analyzer.py"  # Il file che contiene la tua RitardiPlusApp
+                                              # e che ha il suo if __name__ == "__main__":
+    try:
+        print(f"Tentativo di lanciare (subprocess): {sys.executable} {script_name}")
+        # Popen lancia lo script come un processo separato
+        process = subprocess.Popen([sys.executable, script_name])
+        print(f"Script {script_name} lanciato con PID: {process.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name} non è stato trovato.")
+        # È buona norma passare il 'parent' alla messagebox se possibile
+        # (es. la finestra principale della tua app)
+        messagebox.showerror("Errore",
+                             f"Script {script_name} non trovato!\n"
+                             f"Assicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name}:\n{e}")
+
+def lancia_rit_pos():
+    """
+    Lancia lo script esterno analizza_ruota_lotto.py usando subprocess.
+    """
+    script_name_rit_pos = "analizza_ruota_lotto.py"  # Nome del nuovo script esterno
+    try:
+        print(f"Tentativo di lanciare (subprocess): {sys.executable} {script_name_rit_pos}")
+        process_rit_pos = subprocess.Popen([sys.executable, script_name_rit_pos])
+        print(f"Script {script_name_rit_pos} lanciato con PID: {process_rit_pos.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name_rit_pos} non è stato trovato.")
+        messagebox.showerror("Errore",
+                             f"Script {script_name_rit_pos} non trovato!\n"
+                             f"Assicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name_rit_pos}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name_rit_pos}:\n{e}")
+
+
 def esegui_pannello_estrazioni():
     """Avvia il modulo esterno del pannello estrazioni."""
     try:
@@ -7232,8 +7489,9 @@ def esegui_pannello_estrazioni():
 def main():
     """Funzione principale per l'avvio dell'applicazione."""
     # --- Riferimento alle variabili globali ---
-    # Riferimenti alle variabili globali definite FUORI da main()
-    # NON ridefinirle qui dentro a meno che non siano strettamente locali a main()
+    # (Queste dichiarazioni global sono necessarie se assegni NUOVI valori a queste
+    # variabili DENTRO main. Se le usi solo o passi come argomenti, non servono qui.
+    # Per i widget Tkinter creati qui e usati altrove, è meglio passarli o usare metodi)
     global root, textbox, entry_info, pulsanti_ruote, frame_grafico, ruota_selezionata, btn_start
     global entry_start_date, entry_end_date, entry_epochs, entry_batch_size
     global entry_patience, entry_min_delta, entry_neurons_layer1, entry_neurons_layer2
@@ -7243,6 +7501,7 @@ def main():
     global frame_loss_function, frame_optimizer, frame_activation_function, frame_regularization, frame_model_type
     global btn_toggle_noise, btn_toggle_ensemble, btn_clear_activation, btn_clear_model_type
     global app_avatar, num_folds, spinbox_fold, noise_type_var
+    # --- Le funzioni helper definite globalmente non necessitano di 'global' ---
 
     # === INIZIO BLOCCO CONTROLLO LICENZA ===
     should_exit_app = False
@@ -7269,7 +7528,7 @@ def main():
                      import_attempted = True
                      try:
                          # Assumi che importa_licenza() sia definita altrove e gestisca la selezione file etc.
-                         importa_licenza()
+                         importa_licenza() # Assicurati che questa funzione esista globalmente
                      except NameError: messagebox.showerror("Errore", "Funzione 'importa_licenza' non trovata.")
                      except Exception as e_import: messagebox.showerror("Errore Importazione", f"Errore durante l'importazione: {e_import}")
 
@@ -7320,6 +7579,8 @@ def main():
     root = tk.Tk()
 
     # === Definizione Variabili Tkinter Globali (associarle qui è OK) ===
+    # (È generalmente meglio incapsulare queste variabili in una classe,
+    # ma se sono globali, questo è il posto per definirle)
     ruota_selezionata = tk.StringVar(master=root)
     num_folds = tk.IntVar(master=root, value=5)
     entry_epochs = tk.StringVar(master=root, value="10")
@@ -7339,12 +7600,12 @@ def main():
     # =================================================================
 
     root.title("NUMERICAL EMPATHY - Software di Analisi Statistica Avanzata - Created by MASSIMO FERRUGHELLI - IL LOTTO DI MAX ")
-    root.geometry("1280x800")
+    root.geometry("1280x800") # Considera di renderlo adattabile
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-    # Creazione schede
+    # Creazione schede (Frames)
     tab_avatar = ttk.Frame(notebook)
     tab_main = ttk.Frame(notebook)
     tab_model = ttk.Frame(notebook)
@@ -7353,7 +7614,9 @@ def main():
     tab_estrazioni = ttk.Frame(notebook)
     tab_10elotto = ttk.Frame(notebook)
     tab_lotto_analyzer = ttk.Frame(notebook)
-    tab_superenalotto = ttk.Frame(notebook) # Scheda definita qui
+    tab_superenalotto = ttk.Frame(notebook)
+    # >>>>> NUOVO: Crea il frame per la nuova scheda <<<<<
+    tab_numerical_binary = ttk.Frame(notebook)
 
     # Aggiunta schede al notebook
     notebook.add(tab_avatar, text="Presentazione")
@@ -7364,21 +7627,29 @@ def main():
     notebook.add(tab_estrazioni, text="Pannello estrazioni")
     notebook.add(tab_10elotto, text="10 e Lotto Serale")
     notebook.add(tab_lotto_analyzer, text="Lotto Analyzer")
-    notebook.add(tab_superenalotto, text="SuperEnalotto") # Scheda aggiunta qui
+    notebook.add(tab_superenalotto, text="SuperEnalotto")
+    # >>>>> NUOVO: Aggiungi la nuova scheda al notebook <<<<<
+    notebook.add(tab_numerical_binary, text="Numerical Binary")
 
+    # ====================================================================
+    # POPOLAMENTO DELLE SCHEDE (Qui metti il codice per creare i widget
+    #                            all'interno di ciascun frame/tab)
+    # ====================================================================
 
-    # ====================== SCHEDA PRINCIPALE ======================
+    # ====================== SCHEDA PRINCIPALE (tab_main) ======================
+    # (Il tuo codice esistente per popolare tab_main)
     # Frame Titolo
-    title_frame = tk.Frame(tab_main)
+    title_frame = tk.Frame(tab_main) # Widget padre corretto
     title_frame.pack(pady=10, fill=tk.X)
     title_label = tk.Label(title_frame, text="𝐍𝐔𝐌𝐄𝐑𝐈𝐂𝐀𝐋 𝐄𝐌𝐏𝐀𝐓𝐇𝐘", fg="blue", font=("Arial", 24), bg="#ADD8E6")
     title_label.pack(fill=tk.X)
-
+    # ... (resto del codice per popolare tab_main: frame_salvataggio, frame_pulsanti, etc.)
+    # ... (assicurati che tutti i widget siano creati con tab_main come parent)
     # Frame Pulsanti Top
     frame_salvataggio = tk.Frame(tab_main)
     frame_salvataggio.pack(pady=10, fill=tk.X)
-    btn_salva_risultati = tk.Button(frame_salvataggio, text="Salva Risultati", command=salva_risultati, bg="#FFDDC1", width=16)
-    btn_salva_risultati.pack(side=tk.LEFT, padx=5) # Ridotto padding/width per far stare tutto
+   #  btn_salva_risultati = tk.Button(frame_salvataggio, text="Salva Risultati", command=salva_risultati, bg="#FFDDC1", width=16)
+    # btn_salva_risultati.pack(side=tk.LEFT, padx=5)
     btn_aggiorna_estrazioni = tk.Button(frame_salvataggio, text="Aggiornamento Estrazioni", command=esegui_aggiornamento, bg="#FFDDC1", width=20)
     btn_aggiorna_estrazioni.pack(side=tk.LEFT, padx=5)
     btn_carica_valuta_modello = tk.Button(frame_salvataggio, text="Carica e Valuta Modello", command=carica_e_valuta_modello, bg="green", fg="white", width=20)
@@ -7395,7 +7666,14 @@ def main():
     btn_analizzatore_ritardi.pack(side=tk.LEFT, padx=5)
     btn_legge_terzo = tk.Button(frame_salvataggio, text="Legge del Terzo", command=esegui_script_legge_terzo, bg="#E6E6FA", fg="black", width=14)
     btn_legge_terzo.pack(side=tk.LEFT, padx=5)
-
+    btn_spie_dec = tk.Button(frame_salvataggio, text="Spie Dec", command=lancia_spie_dec, bg="#E6E6FA", fg="black", width=14)
+    btn_spie_dec.pack(side=tk.LEFT, padx=5)
+    btn_spie_quind = tk.Button(frame_salvataggio, text="Spie Quind", command=lancia_spie_quind, bg="#E6E6FA", fg="black", width=14)
+    btn_spie_quind.pack(side=tk.LEFT, padx=5)
+    btn_ritardi_plus = tk.Button(frame_salvataggio, text="RitardiPlus", command=lancia_ritardi_plus, bg="#E6E6FA", fg="black", width=14)
+    btn_ritardi_plus.pack(side=tk.LEFT, padx=5)
+    btn_rit_pos = tk.Button(frame_salvataggio, text="Rit Pos", command=lancia_rit_pos, bg="#E6E6FA", fg="black", width=14)
+    btn_rit_pos.pack(side=tk.LEFT, padx=5)
     # Frame Selezione Ruota
     frame_pulsanti = tk.LabelFrame(tab_main, text="Selezione Ruota", padx=10, pady=10)
     frame_pulsanti.pack(pady=10, fill=tk.X)
@@ -7459,69 +7737,39 @@ def main():
     tk.Entry(frame_training, textvariable=entry_patience, width=10, bg="#F0F0F0", fg="black").grid(row=1, column=1, padx=5, pady=5, sticky="w")
     tk.Label(frame_training, text="Min Delta:", bg="#ADD8E6", fg="black", width=20).grid(row=1, column=2, padx=5, pady=5, sticky="e")
     tk.Entry(frame_training, textvariable=entry_min_delta, width=10, bg="#F0F0F0", fg="black").grid(row=1, column=3, padx=5, pady=5, sticky="w")
+    # ====================== FINE SCHEDA PRINCIPALE ======================
 
-    # ====================== SCHEDA AVATAR ======================
-    # Aggiungi il contenuto nella scheda avatar
-    avatar_title = tk.Label(
-        tab_avatar,
-        text="NUMERICAL EMPATHY",
-        font=("Arial", 18, "bold"),
-        fg="blue",
-        bg="#E0F7FA",
-        pady=10
-    )
+
+    # ====================== SCHEDA AVATAR (tab_avatar) ======================
+    # (Il tuo codice esistente per popolare tab_avatar)
+    avatar_title = tk.Label(tab_avatar, text="NUMERICAL EMPATHY", font=("Arial", 18, "bold"), fg="blue", bg="#E0F7FA", pady=10)
     avatar_title.pack(fill=tk.X)
-
     avatar_frame = tk.Frame(tab_avatar, bg="#E6F3FF", pady=20)
     avatar_frame.pack(fill=tk.BOTH, expand=True)
-
-    # Crea un frame centrale per l'avatar
     avatar_center_frame = tk.Frame(avatar_frame, bg="#E6F3FF")
     avatar_center_frame.pack(expand=True)
-
-    # Crea l'avatar
-    app_avatar = Avatar(avatar_center_frame, r"C:\Users\massi\OneDrive\Desktop\Portable Python-3.10.5 x64\Avatar.png", width=150, height=150)
-
-    # Frame per i pulsanti
+    # Assicurati che la classe Avatar sia definita e importata
+    app_avatar = Avatar(avatar_center_frame, r"C:\Users\massi\OneDrive\Desktop\Portable Python-3.10.5 x64\Avatar.png", width=150, height=150) # Potrebbe essere necessario gestire il percorso
     btn_frame = tk.Frame(avatar_center_frame, bg="#E6F3FF", pady=10)
     btn_frame.pack()
-
-    # Pulsanti dell'avatar
-    btn_avatar_speak = tk.Button(
-        btn_frame,
-        text="Attiva Sofia",
-        command=lambda: app_avatar.speak("Benvenuto in Numerical Empathy!  Sono Sofia l'assistente virtuale di Max!  Segui attentamente le istruzioni indicate nella pagina principale al passo 1 e al passo 2. Poi Avvia l'elaborazione. Costruisci il tuo modello preferito , prova diversi modelli e ricorda di usare moderazione nelle giocate. Un saluto a tutti da Sofia"),
-        bg="#9C27B0",
-        fg="white",
-        font=("Arial", 12, "bold"),
-        width=15
-    )
+    btn_avatar_speak = tk.Button(btn_frame, text="Attiva Sofia", command=lambda: app_avatar.speak("Benvenuto in Numerical Empathy!  Sono Sofia l'assistente virtuale di Max!  Segui attentamente le istruzioni indicate nella pagina principale al passo 1 e al passo 2. Poi Avvia l'elaborazione. Costruisci il tuo modello preferito , prova diversi modelli e ricorda di usare moderazione nelle giocate. Un saluto a tutti da Sofia"), bg="#9C27B0", fg="white", font=("Arial", 12, "bold"), width=15)
     btn_avatar_speak.pack(side=tk.LEFT, padx=10, pady=10)
-
-    btn_avatar_stop = tk.Button(
-        btn_frame,
-        text="Ferma Sofia",
-        command=lambda: app_avatar.stop_speaking(),
-        bg="#F44336",
-        fg="white",
-        font=("Arial", 12, "bold"),
-        width=15
-    )
+    btn_avatar_stop = tk.Button(btn_frame, text="Ferma Sofia", command=lambda: app_avatar.stop_speaking(), bg="#F44336", fg="white", font=("Arial", 12, "bold"), width=15)
     btn_avatar_stop.pack(side=tk.LEFT, padx=10, pady=10)
-
-    # Istruzioni per l'avatar
     instructions = tk.Text(avatar_center_frame, width=60, height=8, bg="#F0F0F0", font=("Arial", 10))
     instructions.pack(pady=20)
     instructions.insert(tk.END, "Lei é Sofia l'assistente virtuale di Numerical Empathy.\n\n")
     instructions.insert(tk.END, "Clicca su 'Attiva Sofia' per ricevere un messaggio di benvenuto.\n")
     instructions.insert(tk.END, "Sofia verrà pian pianino migliorata.\n")
     instructions.insert(tk.END, "Usa 'Ferma Sofia' per interrompere la riproduzione vocale.")
-    instructions.config(state=tk.DISABLED)  # Rendi il testo in sola lettura
+    instructions.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA AVATAR ======================
 
-    # ====================== SCHEDA MODELLO ======================
+
+    # ====================== SCHEDA MODELLO (tab_model) ======================
+    # (Il tuo codice esistente per popolare tab_model)
     frame_model_params = tk.LabelFrame(tab_model, text="Struttura del Modello", padx=10, pady=10)
     frame_model_params.pack(pady=10, fill=tk.X)
-    # Usa le StringVar definite globalmente
     layer_vars_model = [
         {"name": "Layer 1", "neurons_var": entry_neurons_layer1, "dropout_var": entry_dropout_layer1},
         {"name": "Layer 2", "neurons_var": entry_neurons_layer2, "dropout_var": entry_dropout_layer2},
@@ -7553,8 +7801,11 @@ def main():
     btn_elu.grid(row=0, column=2, padx=10, pady=10)
     btn_clear_activation = tk.Button(frame_activation_function, text="Nessuna selezione", command=lambda: select_activation(None), bg=BUTTON_DEFAULT_COLOR, width=20)
     btn_clear_activation.grid(row=0, column=3, padx=10, pady=10)
+    # ====================== FINE SCHEDA MODELLO ======================
 
-    # ====================== SCHEDA AVANZATE ======================
+
+    # ====================== SCHEDA AVANZATE (tab_advanced) ======================
+    # (Il tuo codice esistente per popolare tab_advanced)
     frame_optimizer = tk.LabelFrame(tab_advanced, text="Ottimizzatore", padx=10, pady=10)
     frame_optimizer.pack(pady=10, fill=tk.X)
     optimizer_buttons = {}
@@ -7580,7 +7831,6 @@ def main():
     frame_regularization.pack(pady=10, fill=tk.X)
     reg_buttons = {}
     regularizations = [{"name": "Nessuna", "value": None}, {"name": "L1", "value": "l1"}, {"name": "L2", "value": "l2"}]
-    # Assicurati che questi bottoni siano assegnati a variabili globali se necessario altrove
     btn_reg_none, btn_reg_l1, btn_reg_l2 = None, None, None
     for i, reg in enumerate(regularizations):
         btn = tk.Button(frame_regularization, text=reg["name"], command=lambda v=reg["value"]: select_regularization(v), bg=BUTTON_DEFAULT_COLOR, width=20)
@@ -7608,7 +7858,7 @@ def main():
     tk.Button(frame_noise, text="Imposta Scala", command=lambda: update_noise_scale(entry_noise_scale.get()), width=15).grid(row=0, column=4)
     tk.Label(frame_noise, text="% Rumore:", width=15).grid(row=1, column=0)
     tk.Entry(frame_noise, textvariable=entry_noise_percentage, width=10).grid(row=1, column=1)
-    tk.Button(frame_noise, text="Imposta %", command=lambda: update_noise_percentage(entry_noise_percentage.get()), width=15).grid(row=1, column=2, columnspan=2) # Corretto columnspan
+    tk.Button(frame_noise, text="Imposta %", command=lambda: update_noise_percentage(entry_noise_percentage.get()), width=15).grid(row=1, column=2, columnspan=2)
     btn_toggle_noise = tk.Button(frame_noise, text="Attiva/Disattiva Rumore", command=toggle_adaptive_noise, bg=BUTTON_DEFAULT_COLOR, width=20)
     btn_toggle_noise.grid(row=1, column=4)
 
@@ -7627,27 +7877,31 @@ def main():
     frame_cache = tk.LabelFrame(tab_advanced, text="Gestione Cache e File", padx=10, pady=10)
     frame_cache.pack(pady=10, fill=tk.X)
     tk.Button(frame_cache, text="Pulisci Cache", command=pulisci_cache, bg="#FFB6C1", width=25).pack(side=tk.LEFT, padx=10, pady=10)
-    tk.Button(frame_cache, text="Verifica Integrità File", command=verifica_integrità_file, bg="#B0E0E6", width=25).pack(side=tk.LEFT, padx=10, pady=5) # Ridotto pady
+    tk.Button(frame_cache, text="Verifica Integrità File", command=verifica_integrità_file, bg="#B0E0E6", width=25).pack(side=tk.LEFT, padx=10, pady=5)
+    # ====================== FINE SCHEDA AVANZATE ======================
 
 
-    # ====================== SCHEDA RISULTATI ======================
+    # ====================== SCHEDA RISULTATI (tab_results) ======================
+    # (Il tuo codice esistente per popolare tab_results)
     text_frame = tk.Frame(tab_results)
     text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
     scrollbar = ttk.Scrollbar(text_frame)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     scrollbar_x = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL)
     scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
-    # Assicurati che 'textbox' sia definito qui se non è globale
+    # Definisci 'textbox' come widget Text qui
     textbox = tk.Text(text_frame, height=15, width=90, wrap=tk.NONE, yscrollcommand=scrollbar.set, xscrollcommand=scrollbar_x.set)
     textbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.config(command=textbox.yview)
     scrollbar_x.config(command=textbox.xview)
-    # Assicurati che 'frame_grafico' sia definito qui se non è globale
+    # Definisci 'frame_grafico' come widget Frame qui
     frame_grafico = tk.Frame(tab_results)
     frame_grafico.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    # ====================== FINE SCHEDA RISULTATI ======================
 
 
-    # ====================== SCHEDA PANNELLO ESTRAZIONI ======================
+    # ====================== SCHEDA PANNELLO ESTRAZIONI (tab_estrazioni) ======================
+    # (Il tuo codice esistente per popolare tab_estrazioni)
     estrazioni_title = tk.Label(tab_estrazioni, text="PANNELLO ESTRAZIONI", font=("Arial", 18, "bold"), fg="blue", bg="#E0F7FA", pady=10)
     estrazioni_title.pack(fill=tk.X)
     estrazioni_frame = tk.Frame(tab_estrazioni, bg="#E6F3FF", pady=20)
@@ -7660,9 +7914,11 @@ def main():
     estrazioni_descrizione.pack(pady=20)
     estrazioni_descrizione.insert(tk.END, "Il Pannello Estrazioni permette di controllare e verificare i tuoi numeri.\n...") # Testo troncato per brevità
     estrazioni_descrizione.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA PANNELLO ESTRAZIONI ======================
 
 
-    # ====================== SCHEDA 10 e LOTTO SERALE ======================
+    # ====================== SCHEDA 10 e LOTTO SERALE (tab_10elotto) ======================
+    # (Il tuo codice esistente per popolare tab_10elotto)
     lotto_title = tk.Label( tab_10elotto, text="ANALISI 10 e LOTTO SERALE", font=("Arial", 18, "bold"), fg="darkgreen", bg="#E0F2E0", pady=10)
     lotto_title.pack(fill=tk.X)
     lotto_frame = tk.Frame(tab_10elotto, bg="#F0FFF0", pady=20)
@@ -7676,9 +7932,11 @@ def main():
     lotto_descrizione.pack(pady=20)
     lotto_descrizione.insert(tk.END, "Questo modulo permette di:\n\n • Caricare l'archivio 10eLotto.\n • Configurare la rete neurale.\n • Definire parametri di training.\n • Addestrare il modello.\n • Generare previsioni.\n • Verificare risultati.")
     lotto_descrizione.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA 10 e LOTTO SERALE ======================
 
 
-    # ====================== SCHEDA LOTTO ANALYZER ======================
+    # ====================== SCHEDA LOTTO ANALYZER (tab_lotto_analyzer) ======================
+    # (Il tuo codice esistente per popolare tab_lotto_analyzer)
     lotto_analyzer_title = tk.Label(tab_lotto_analyzer, text="ANALISI e PREVISIONE LOTTO", font=("Arial", 18, "bold"), fg="darkblue", bg="#E0E8F0", pady=10)
     lotto_analyzer_title.pack(fill=tk.X)
     lotto_analyzer_frame = tk.Frame(tab_lotto_analyzer, bg="#F0F5FF", pady=20)
@@ -7692,110 +7950,93 @@ def main():
     lotto_analyzer_descrizione.pack(pady=20)
     lotto_analyzer_descrizione.insert(tk.END, "Questo modulo permette di:\n\n • Caricare archivi storici del Lotto per ruote selezionate.\n • Definire periodo di analisi e lunghezza sequenze.\n • Configurare parametri del modello neurale (layers, dropout, regolarizzazione).\n • Definire parametri di training (epoche, batch size, early stopping).\n • Addestrare il modello sui dati selezionati.\n • Generare una previsione basata sull'ultima sequenza disponibile.\n • Verificare la previsione generata sulle estrazioni successive.")
     lotto_analyzer_descrizione.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA LOTTO ANALYZER ======================
 
 
-    # ====================== NUOVA SCHEDA SUPERENALOTTO (Indentazione Corretta) ======================
-    # Popola la scheda creata in precedenza (tab_superenalotto)
-
-    # Titolo scheda SuperEnalotto
-    superenalotto_title = tk.Label(
-        tab_superenalotto, # Widget padre corretto
-        text="ANALISI E PREVISIONE SUPERENALOTTO",
-        font=("Arial", 18, "bold"),
-        fg="#D2691E",
-        bg="#FAF0E6",
-        pady=10
-    )
-    superenalotto_title.pack(fill=tk.X) # pack() corretto
-
-    # Frame principale per la scheda SuperEnalotto
-    superenalotto_frame = tk.Frame(
-        tab_superenalotto, # Widget padre corretto
-        bg="#FFF8DC",
-        pady=20
-    )
-    superenalotto_frame.pack(fill=tk.BOTH, expand=True) # pack() corretto
-
-    # Etichetta informativa SuperEnalotto
-    superenalotto_info = tk.Label(
-        superenalotto_frame, # Widget padre corretto
-        text="Avvia il modulo dedicato all'analisi statistica, training del modello\n e generazione di previsioni per il gioco del SuperEnalotto.",
-        font=("Arial", 12),
-        bg="#FFF8DC",
-        pady=10,
-        justify=tk.CENTER
-    )
-    superenalotto_info.pack() # pack() corretto
-
-    # Pulsante di avvio SuperEnalotto
+    # ====================== SCHEDA SUPERENALOTTO (tab_superenalotto) ======================
+    # (Il tuo codice esistente per popolare tab_superenalotto)
+    superenalotto_title = tk.Label(tab_superenalotto, text="ANALISI E PREVISIONE SUPERENALOTTO", font=("Arial", 18, "bold"), fg="#D2691E", bg="#FAF0E6", pady=10)
+    superenalotto_title.pack(fill=tk.X)
+    superenalotto_frame = tk.Frame(tab_superenalotto, bg="#FFF8DC", pady=20)
+    superenalotto_frame.pack(fill=tk.BOTH, expand=True)
+    superenalotto_info = tk.Label(superenalotto_frame, text="Avvia il modulo dedicato all'analisi statistica, training del modello\n e generazione di previsioni per il gioco del SuperEnalotto.", font=("Arial", 12), bg="#FFF8DC", pady=10, justify=tk.CENTER)
+    superenalotto_info.pack()
     superenalotto_button_state = tk.NORMAL if SUPERENALOTTO_MODULE_LOADED else tk.DISABLED
-    btn_avvia_superenalotto = tk.Button(
-        superenalotto_frame, # Widget padre corretto
-        text="Avvia Modulo SuperEnalotto",
-        command=lambda: open_superenalotto_module_helper(root),
-        state=superenalotto_button_state,
-        bg="#8B4513",
+    btn_avvia_superenalotto = tk.Button(superenalotto_frame, text="Avvia Modulo SuperEnalotto", command=lambda: open_superenalotto_module_helper(root), state=superenalotto_button_state, bg="#8B4513", fg="white", font=("Arial", 14, "bold"), width=30, height=2)
+    btn_avvia_superenalotto.pack(pady=20)
+    superenalotto_descrizione = tk.Text(superenalotto_frame, width=80, height=10, bg="#F5F5DC", font=("Arial", 10))
+    superenalotto_descrizione.pack(pady=20)
+    superenalotto_descrizione.insert(tk.END, "Questo modulo ('selotto_module.py') permette di:\n\n • Caricare l'archivio storico del SuperEnalotto.\n • Definire periodo di analisi e lunghezza sequenze.\n • Configurare parametri del modello neurale (layers, dropout, etc.).\n • Definire parametri di training (epoche, batch size, early stopping).\n • Addestrare il modello sui dati selezionati.\n • Generare una previsione dei 6 numeri principali.\n • Verificare la previsione generata sulle estrazioni successive.")
+    superenalotto_descrizione.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA SUPERENALOTTO ======================
+
+
+    # >>>>> NUOVO: POPOLAMENTO SCHEDA NUMERICAL BINARY (tab_numerical_binary) <<<<<
+    nb_title = tk.Label(tab_numerical_binary, text="ANALISI NUMERICAL BINARY", font=("Arial", 18, "bold"), fg="navy", bg="#E6E6FA", pady=10)
+    nb_title.pack(fill=tk.X)
+    nb_frame = tk.Frame(tab_numerical_binary, bg="#F8F8FF", pady=20)
+    nb_frame.pack(fill=tk.BOTH, expand=True)
+    nb_info = tk.Label(nb_frame, text="Avvia il modulo per l'analisi delle sequenze binarie\n basate sui pattern verticali nel gioco del Lotto.", font=("Arial", 12), bg="#F8F8FF", pady=10, justify=tk.CENTER)
+    nb_info.pack()
+    # Controlla se il modulo è stato caricato correttamente
+    nb_button_state = tk.NORMAL if NUMERICAL_BINARY_MODULE_LOADED else tk.DISABLED
+    btn_avvia_nb = tk.Button(
+        nb_frame, # Widget padre corretto
+        text="Avvia Modulo Numerical Binary",
+        command=lambda: open_numerical_binary_helper(root), # Chiama l'helper corretto
+        state=nb_button_state, # Stato basato sul caricamento
+        bg="#6A5ACD", # Colore esempio
         fg="white",
         font=("Arial", 14, "bold"),
-        width=30,
+        width=30, # Larghezza consistente
         height=2
     )
-    btn_avvia_superenalotto.pack(pady=20) # pack() corretto
-
-    # Descrizione testuale SuperEnalotto
-    superenalotto_descrizione = tk.Text(
-        superenalotto_frame, # Widget padre corretto
-        width=80,
-        height=10,
-        bg="#F5F5DC",
-        font=("Arial", 10)
-    )
-    superenalotto_descrizione.pack(pady=20) # pack() corretto
-    superenalotto_descrizione.insert(tk.END, "Questo modulo ('selotto_module.py') permette di:\n\n")
-    superenalotto_descrizione.insert(tk.END, " • Caricare l'archivio storico del SuperEnalotto.\n")
-    superenalotto_descrizione.insert(tk.END, " • Definire periodo di analisi e lunghezza sequenze.\n")
-    superenalotto_descrizione.insert(tk.END, " • Configurare parametri del modello neurale (layers, dropout, etc.).\n")
-    superenalotto_descrizione.insert(tk.END, " • Definire parametri di training (epoche, batch size, early stopping).\n")
-    superenalotto_descrizione.insert(tk.END, " • Addestrare il modello sui dati selezionati.\n")
-    superenalotto_descrizione.insert(tk.END, " • Generare una previsione dei 6 numeri principali.\n")
-    superenalotto_descrizione.insert(tk.END, " • Verificare la previsione generata sulle estrazioni successive.")
-    superenalotto_descrizione.config(state=tk.DISABLED)
-    # =====================================================================
+    btn_avvia_nb.pack(pady=20) # Posiziona il bottone
+    nb_descrizione = tk.Text(nb_frame, width=80, height=10, bg="#F0F0F0", font=("Arial", 10))
+    nb_descrizione.pack(pady=20)
+    nb_descrizione.insert(tk.END, "Questo modulo ('numerical_binary_module.py') permette di:\n\n")
+    nb_descrizione.insert(tk.END, " • Caricare archivi storici del Lotto da GitHub.\n")
+    nb_descrizione.insert(tk.END, " • Convertire i numeri estratti in rappresentazione binaria.\n")
+    nb_descrizione.insert(tk.END, " • Analizzare pattern verticali di una data lunghezza (H).\n")
+    nb_descrizione.insert(tk.END, " • Identificare i pattern più sbilanciati (0 vs 1) su base storica.\n")
+    nb_descrizione.insert(tk.END, " • Generare una previsione binaria (e decimale) per le 5 posizioni.\n")
+    nb_descrizione.insert(tk.END, " • Eseguire backtesting storico per validare l'efficacia del metodo.")
+    nb_descrizione.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA NUMERICAL BINARY ======================
 
 
     # --- Configurazione finale e avvio mainloop ---
-    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.protocol("WM_DELETE_WINDOW", on_closing) # Assicurati che on_closing sia definita
     try:
-        # Imposta stati iniziali dei bottoni di selezione
+        # Imposta stati iniziali dei bottoni di selezione (se necessario)
+        # Questi potrebbero essere meglio gestiti in funzioni dedicate o classi
         select_optimizer('adam')
         select_loss_function('custom_loss_function')
         select_activation('relu')
         select_regularization(None)
         select_model_type('dense')
-        if 'btn_toggle_noise' in globals() and btn_toggle_noise: btn_toggle_noise["bg"] = BUTTON_DEFAULT_COLOR
-        if 'btn_toggle_ensemble' in globals() and btn_toggle_ensemble: btn_toggle_ensemble["bg"] = BUTTON_DEFAULT_COLOR
+        if 'btn_toggle_noise' in locals() and btn_toggle_noise: btn_toggle_noise["bg"] = BUTTON_DEFAULT_COLOR
+        if 'btn_toggle_ensemble' in locals() and btn_toggle_ensemble: btn_toggle_ensemble["bg"] = BUTTON_DEFAULT_COLOR
     except NameError as e_name: print(f"Warning: Funzione select_* o bottone non trovato durante inizializzazione UI: {e_name}")
     except Exception as e_init: print(f"Warning: Errore generico impostazione iniziale UI: {e_init}")
 
     try:
-        # Inserimento testo iniziale nel textbox (se esiste)
+        # Inserimento testo iniziale nel textbox (se esiste ed è valido)
         if 'textbox' in globals() and isinstance(textbox, tk.Text):
             textbox.insert(tk.END, "Benvenuto in NUMERICAL EMPATHY!\n")
             textbox.insert(tk.END, "Seleziona una ruota e configura i parametri per iniziare.\n")
-            textbox.insert(tk.END, "STATO MODULI:\n")
-            if LOTTO_MODULE_LOADED: textbox.insert(tk.END, " - Modulo 10eLotto: OK\n")
-            else: textbox.insert(tk.END, " - Modulo 10eLotto: NON CARICATO\n")
-            if LOTTO_ANALYZER_MODULE_LOADED: textbox.insert(tk.END, " - Modulo Lotto Analyzer: OK\n")
-            else: textbox.insert(tk.END, " - Modulo Lotto Analyzer: NON CARICATO\n")
-            if SUPERENALOTTO_MODULE_LOADED: textbox.insert(tk.END, " - Modulo SuperEnalotto: OK\n")
-            else: textbox.insert(tk.END, " - Modulo SuperEnalotto: NON CARICATO\n")
+            textbox.insert(tk.END, "STATO MODULI CARICATI:\n")
+            textbox.insert(tk.END, f" - Modulo 10eLotto: {'OK' if LOTTO_MODULE_LOADED else 'NON CARICATO'}\n")
+            textbox.insert(tk.END, f" - Modulo Lotto Analyzer: {'OK' if LOTTO_ANALYZER_MODULE_LOADED else 'NON CARICATO'}\n")
+            textbox.insert(tk.END, f" - Modulo SuperEnalotto: {'OK' if SUPERENALOTTO_MODULE_LOADED else 'NON CARICATO'}\n")
+            textbox.insert(tk.END, f" - Modulo Numerical Binary: {'OK' if NUMERICAL_BINARY_MODULE_LOADED else 'NON CARICATO'}\n") # <<< NUOVO CONTROLLO
         else:
-             print("Warning: Textbox non definita o non è un widget Text valido.")
-    except Exception as e_textbox: print(f"Warning: Errore inserimento testo iniziale: {e_textbox}")
+             print("Warning: Textbox non definita o non è un widget Text valido per messaggio iniziale.")
+    except Exception as e_textbox: print(f"Warning: Errore inserimento testo iniziale nel textbox: {e_textbox}")
 
     notebook.select(1) # Seleziona la scheda "Principale" all'avvio
 
-    return root
+    return root # Restituisce l'oggetto root per il blocco __main__
 # --- Fine funzione main() ---
 
 
@@ -7813,7 +8054,7 @@ if __name__ == "__main__":
                 print(f"Nota: impossibile impostare DPI awareness ({e_dpi})")
 
         # Chiama main() per costruire la GUI e ottenere l'oggetto root
-        root = main()
+        root = main() # <= Chiamata a main()
         if root is None or not isinstance(root, tk.Tk):
             print("ERRORE CRITICO: la funzione main() non ha restituito un'istanza valida di Tkinter Tk(). Chiusura.")
             sys.exit(1)

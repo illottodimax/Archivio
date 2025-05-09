@@ -26,7 +26,7 @@ try:
 except ImportError:
     HAS_TKCALENDAR = False
 
-DEFAULT_10ELOTTO_CHECK_COLPI = 1
+DEFAULT_10ELOTTO_CHECK_COLPI = 5
 DEFAULT_10ELOTTO_DATA_URL = "https://raw.githubusercontent.com/illottodimax/Archivio/main/it-10elotto-past-draws-archive.txt"
 # NUOVO: Default per K-Fold Cross-Validation
 DEFAULT_CV_SPLITS = 5
@@ -80,12 +80,14 @@ def carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callba
     """
     Carica i dati del 10eLotto da un URL (RAW GitHub) o da un file locale.
     Gestisce la colonna vuota extra.
-    (Funzione invariata rispetto alla versione precedente)
+    MODIFICATO: Non rimuove più le righe solo perché la data non è valida (NaT).
+               Logga un avviso se vengono trovate date non valide.
     """
     lines = []
     is_url = data_source.startswith("http://") or data_source.startswith("https://")
 
     try:
+        # --- Blocco Caricamento Dati (URL o Locale) - INVARIATO ---
         if is_url:
             if log_callback: log_callback(f"Caricamento dati 10eLotto da URL: {data_source}")
             try:
@@ -122,23 +124,22 @@ def carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callba
             if not file_read_success:
                  if log_callback: log_callback("ERRORE: Impossibile leggere il file locale.")
                  return None, None, None, None
+        # --- Fine Blocco Caricamento Dati ---
 
-        # --- Parsing (Logica quasi invariata, opera su 'lines') ---
+        # --- Blocco Parsing Righe e Creazione DataFrame Iniziale - INVARIATO ---
         if log_callback: log_callback(f"Lette {len(lines)} righe totali dalla fonte dati.")
         if not lines or len(lines) < 2:
             if log_callback: log_callback("ERRORE: Dati vuoti o solo intestazione.")
             return None, None, None, None
 
-        data_lines = lines[1:]
+        data_lines = lines[1:] # Salta header
         data = []; malformed_lines = 0; min_expected_cols = 24 # Data + 20 Num + Vuota + Oro1 + Oro2
         for i, line in enumerate(data_lines):
-            # Usa rstrip() per rimuovere solo spazi/newline a destra prima dello split
             values = line.rstrip().split('\t')
             if len(values) >= min_expected_cols:
                 data.append(values)
             else:
                 malformed_lines += 1
-                # Log solo le prime righe scartate per evitare spam
                 if malformed_lines < 5 and log_callback: log_callback(f"ATT: Riga {i+2} scartata (campi < {min_expected_cols}, trovati {len(values)}): '{line.strip()}'")
         if malformed_lines > 0 and log_callback: log_callback(f"ATTENZIONE: {malformed_lines} righe totali scartate (poche colonne).")
         if not data:
@@ -146,86 +147,155 @@ def carica_dati_10elotto(data_source, start_date=None, end_date=None, log_callba
             return None, None, None, None
 
         max_cols = max(len(row) for row in data)
-        # Crea nomi colonne dinamicamente ma con i nomi noti per i primi 24/25
         colonne_note = ['Data'] + [f'Num{i+1}' for i in range(20)] + ['ColonnaVuota', 'Oro1', 'Oro2']
-        colonne_finali = list(colonne_note) # Copia
-        # Aggiungi colonne extra se ce ne sono
+        colonne_finali = list(colonne_note)
         if max_cols > len(colonne_note):
              colonne_finali.extend([f'ExtraCol{i}' for i in range(len(colonne_note), max_cols)])
 
-        df = pd.DataFrame(data, columns=colonne_finali[:max_cols]) # Applica nomi colonne
+        df = pd.DataFrame(data, columns=colonne_finali[:max_cols])
         if log_callback: log_callback(f"Creato DataFrame shape: {df.shape}, Colonne: {df.columns.tolist()}")
 
-        # Rimuovi la colonna vuota se esiste
         if 'ColonnaVuota' in df.columns:
              df = df.drop(columns=['ColonnaVuota'])
              if log_callback: log_callback("Rimossa 'ColonnaVuota'.")
+        # --- Fine Blocco Parsing ---
 
-        # --- Pulizia e filtraggio (logica invariata) ---
-        if 'Data' not in df.columns: log_callback("ERRORE: Colonna 'Data' mancante."); return None, None, None, None
+        # --- Blocco Pulizia Date (MODIFICATO) ---
+        if 'Data' not in df.columns:
+            log_callback("ERRORE: Colonna 'Data' mancante."); return None, None, None, None
+
+        # Converte in datetime, gli errori diventano NaT (Not a Time)
         df['Data'] = pd.to_datetime(df['Data'], format='%Y-%m-%d', errors='coerce')
-        original_rows = len(df); df = df.dropna(subset=['Data'])
-        if original_rows - len(df) > 0 and log_callback: log_callback(f"Rimosse {original_rows - len(df)} righe (data non valida).")
-        if df.empty: log_callback("ERRORE: Nessun dato dopo pulizia date."); return df, None, None, None # Ritorna df vuoto
-        df = df.sort_values(by='Data', ascending=True) # Ordina per data
 
+        # Identifica e logga le righe con date non valide (NaT) MA NON LE RIMUOVE
+        invalid_date_mask = pd.isna(df['Data'])
+        num_invalid_dates = invalid_date_mask.sum()
+
+        if num_invalid_dates > 0:
+            if log_callback:
+                log_callback(f"--- ATTENZIONE: Identificate {num_invalid_dates} righe con data non valida (NaT) ---")
+                log_callback(f"    (Queste righe NON sono state rimosse in questa fase e i loro numeri")
+                log_callback(f"     potrebbero essere inclusi se i numeri sono validi e se la riga")
+                log_callback(f"     non viene esclusa dal filtro date utente successivo)")
+                # Loggare le righe specifiche è opzionale ma può essere utile per il debug
+                logged_count = 0
+                max_log_rows = 5 # Limita output
+                invalid_rows_df = df[invalid_date_mask]
+                for index, row in invalid_rows_df.iterrows():
+                    if logged_count >= max_log_rows:
+                        log_callback(f"    (... e altre {num_invalid_dates - logged_count} righe non valide non mostrate)")
+                        break
+                    log_callback(f"  -> Riga Indice DF: {index}")
+                    # log_callback(f"     {row.to_string()}") # Scommenta per vedere l'intera riga
+                    logged_count += 1
+                log_callback("---------------------------------------------------------------------")
+
+        # Non rimuoviamo più le righe basate su NaT nella data
+        # original_rows = len(df); # Non più necessario qui
+        # df = df.dropna(subset=['Data']) # <--- RIMOSSO / COMMENTATO
+
+        # Verifica se il DataFrame è vuoto dopo i passaggi iniziali
+        if df.empty:
+             log_callback("ERRORE: Nessun dato rimasto dopo il parsing iniziale."); return df, None, None, None # Ritorna df vuoto
+
+        # Ordina per data, mettendo eventuali NaT all'inizio (o alla fine se preferisci 'last')
+        df = df.sort_values(by='Data', ascending=True, na_position='first')
+        # --- Fine Blocco Pulizia Date ---
+
+        # --- Blocco Filtro Date Utente - INVARIATO ---
+        # Questo filtro escluderà probabilmente le righe con NaT, il che è ok.
         if start_date:
-            try: start_dt = pd.to_datetime(start_date); df = df[df['Data'] >= start_dt]
+            try:
+                 start_dt = pd.to_datetime(start_date)
+                 # Il confronto con NaT risulterà False, quindi le righe NaT verranno escluse qui
+                 df = df[df['Data'] >= start_dt]
             except Exception as e: log_callback(f"Errore filtro data inizio: {e}")
         if end_date:
-             try: end_dt = pd.to_datetime(end_date); df = df[df['Data'] <= end_dt]
+             try:
+                 end_dt = pd.to_datetime(end_date)
+                 # Il confronto con NaT risulterà False, quindi le righe NaT verranno escluse qui
+                 df = df[df['Data'] <= end_dt]
              except Exception as e: log_callback(f"Errore filtro data fine: {e}")
-        if log_callback: log_callback(f"Righe dopo filtro date ({start_date} - {end_date}): {len(df)}")
 
+        if log_callback: log_callback(f"Righe dopo filtro date utente ({start_date} - {end_date}): {len(df)}")
+        # --- Fine Blocco Filtro Date Utente ---
+
+        # --- Blocco Estrazione Numeri (principali, oro, extra) - INVARIATO ---
         numeri_cols = [f'Num{i+1}' for i in range(20)]; numeri_array, numeri_oro, numeri_extra = None, None, None
         if not df.empty:
-            df_cleaned = df.copy() # Lavora su una copia per la pulizia numerica
-            if not all(col in df_cleaned.columns for col in numeri_cols): log_callback(f"ERRORE: Colonne Num1-20 mancanti."); return df.copy(), None, None, None
+            # Lavora su una copia del DataFrame filtrato per data
+            df_cleaned = df.copy()
+
+            # Verifica presenza colonne Num1-20
+            if not all(col in df_cleaned.columns for col in numeri_cols):
+                 log_callback(f"ERRORE: Colonne Num1-20 mancanti nel dataframe filtrato."); return df.copy(), None, None, None # Ritorna df filtrato
+
+            # Prova a convertire i numeri Num1-20 e rimuovi righe dove fallisce
             try:
                 for col in numeri_cols: df_cleaned[col] = pd.to_numeric(df_cleaned[col], errors='coerce')
-                rows_b4 = len(df_cleaned); df_cleaned = df_cleaned.dropna(subset=numeri_cols); dropped = rows_b4 - len(df_cleaned)
-                if dropped > 0 and log_callback: log_callback(f"Scartate {dropped} righe (Num1-20 non numerici).")
-                if not df_cleaned.empty: numeri_array = df_cleaned[numeri_cols].values.astype(int)
-                else: log_callback("ATTENZIONE: Nessuna riga dopo pulizia Num1-20.")
-            except Exception as e: log_callback(f"ERRORE pulizia Num1-20: {e}")
+                rows_b4_num_clean = len(df_cleaned)
+                df_cleaned = df_cleaned.dropna(subset=numeri_cols) # Rimuove righe con Num1-20 non numerici
+                dropped_num = rows_b4_num_clean - len(df_cleaned)
+                if dropped_num > 0 and log_callback: log_callback(f"Scartate {dropped_num} righe (Num1-20 non numerici).")
 
-            # Estrai Oro SOLO se numeri_array è stato estratto (dalle righe valide)
+                # Estrai l'array dei numeri principali SE ci sono righe valide rimaste
+                if not df_cleaned.empty:
+                    numeri_array = df_cleaned[numeri_cols].values.astype(int)
+                else:
+                    log_callback("ATTENZIONE: Nessuna riga rimasta dopo pulizia Num1-20.")
+            except Exception as e: log_callback(f"ERRORE pulizia/estrazione Num1-20: {e}")
+
+            # Estrai Oro SOLO se numeri_array è stato estratto e dalle righe in df_cleaned
+            # Usa df_cleaned perché contiene le righe dove Num1-20 sono validi
             if numeri_array is not None and 'Oro1' in df_cleaned.columns and 'Oro2' in df_cleaned.columns:
                 try:
-                    df_cleaned['Oro1'] = pd.to_numeric(df_cleaned['Oro1'], errors='coerce'); df_cleaned['Oro2'] = pd.to_numeric(df_cleaned['Oro2'], errors='coerce')
-                    df_cleaned_oro = df_cleaned.dropna(subset=['Oro1', 'Oro2']) # Usa una var temporanea per non perdere righe per Extra
-                    if not df_cleaned_oro.empty:
-                         numeri_oro = df_cleaned_oro[['Oro1', 'Oro2']].values.astype(int)
+                    # Lavoriamo su una copia specifica per Oro per non alterare df_cleaned per Extra
+                    df_oro_temp = df_cleaned.copy()
+                    df_oro_temp['Oro1'] = pd.to_numeric(df_oro_temp['Oro1'], errors='coerce')
+                    df_oro_temp['Oro2'] = pd.to_numeric(df_oro_temp['Oro2'], errors='coerce')
+                    df_oro_temp = df_oro_temp.dropna(subset=['Oro1', 'Oro2'])
+                    if not df_oro_temp.empty:
+                         numeri_oro = df_oro_temp[['Oro1', 'Oro2']].values.astype(int)
                          if log_callback: log_callback(f"Estratto array Oro. Shape: {numeri_oro.shape}")
-                    else: numeri_oro = None
+                    else:
+                        numeri_oro = None
+                        if log_callback: log_callback("Nessuna riga valida per estrazione Oro (dopo pulizia Oro).")
                 except Exception as e: log_callback(f"Errore pulizia/estrazione Oro: {e}")
 
-            # Estrai Extra dalle righe dove Num1-20 sono validi (df_cleaned)
+            # Estrai Extra SOLO se numeri_array è stato estratto e dalle righe in df_cleaned
             if numeri_array is not None and any(col.startswith('ExtraCol') for col in df_cleaned.columns):
                  extra_cols = [col for col in df_cleaned.columns if col.startswith('ExtraCol')]
                  if extra_cols:
-                      # Tenta di convertire in numerico, ignora errori per ora
+                      first_extra_col = extra_cols[0]
                       try:
-                          extra_vals = pd.to_numeric(df_cleaned[extra_cols[0]], errors='coerce')
-                          # Mantieni solo le righe dove extra è valido, se necessario
-                          # df_cleaned_extra = df_cleaned.dropna(subset=[extra_cols[0]])
-                          # numeri_extra = df_cleaned_extra[extra_cols[0]].values
-                          numeri_extra = extra_vals.values # Prendi tutti, potrebbero esserci NaN
-                          if log_callback: log_callback(f"Estratta colonna Extra '{extra_cols[0]}'.")
+                          # Estrai la colonna extra da df_cleaned (dove Num1-20 sono validi)
+                          # NON fare dropna qui, così manteniamo la corrispondenza con numeri_array
+                          extra_vals = pd.to_numeric(df_cleaned[first_extra_col], errors='coerce')
+                          numeri_extra = extra_vals.values # Può contenere NaN se Extra non è numerico
+                          if log_callback: log_callback(f"Estratta colonna Extra '{first_extra_col}'. Shape: {numeri_extra.shape}")
                       except Exception as e_ex:
-                          log_callback(f"ATTENZIONE: Errore conversione colonna Extra '{extra_cols[0]}': {e_ex}")
+                          log_callback(f"ATTENZIONE: Errore conversione colonna Extra '{first_extra_col}': {e_ex}")
                           numeri_extra = None
                  else:
                       numeri_extra = None
+        # --- Fine Blocco Estrazione Numeri ---
 
-        final_rows_df = len(df) # Righe nel df originale dopo filtro date
-        final_rows_arr = len(numeri_array) if numeri_array is not None else 0 # Righe nell'array pulito
-        if log_callback: log_callback(f"Caricamento/Filtraggio completato. Righe df finali: {final_rows_df}, Righe array numeri: {final_rows_arr}")
+        # --- Log Finale e Ritorno ---
+        final_rows_df = len(df) # Righe nel df dopo filtro date utente
+        final_rows_arr = len(numeri_array) if numeri_array is not None else 0 # Righe nell'array pulito (dopo dropna su numeri)
+        if log_callback:
+            log_callback(f"Caricamento/Filtraggio completato.")
+            log_callback(f"  Righe df dopo filtro date: {final_rows_df}")
+            log_callback(f"  Righe array numeri (Num1-20 validi): {final_rows_arr}")
 
-        # Ritorna il df originale filtrato per data e gli array numerici puliti
+        # Ritorna il df filtrato per data e gli array numerici puliti
+        # df.copy() contiene le righe con date valide che rientrano nel range utente
+        # numeri_array contiene i Num1-20 dalle righe sopra, solo dove erano numerici validi
         return df.copy(), numeri_array, numeri_oro, numeri_extra
+        # --- Fine Log Finale e Ritorno ---
+
     except Exception as e:
-        if log_callback: log_callback(f"Errore grave carica_dati_10elotto V2: {e}\n{traceback.format_exc()}");
+        if log_callback: log_callback(f"Errore grave in carica_dati_10elotto: {e}\n{traceback.format_exc()}");
         return None, None, None, None
 
 
@@ -734,11 +804,11 @@ class App10eLotto:
             self.end_date_entry = ttk.Entry(self.data_params_frame, width=12); self.end_date_entry.insert(0, datetime.now().strftime('%Y-%m-%d'))
             self.end_date_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
         ttk.Label(self.data_params_frame, text="Seq. Input (Storia):").grid(row=2, column=0, padx=5, pady=5, sticky=tk.W)
-        self.seq_len_var = tk.StringVar(value="7") # Aumentato leggermente default
+        self.seq_len_var = tk.StringVar(value="5") # Aumentato leggermente default
         self.seq_len_entry = ttk.Spinbox(self.data_params_frame, from_=2, to=50, textvariable=self.seq_len_var, width=5, wrap=True, state='readonly')
         self.seq_len_entry.grid(row=2, column=1, padx=5, pady=5, sticky=tk.W)
         ttk.Label(self.data_params_frame, text="Numeri da Prevedere:").grid(row=3, column=0, padx=5, pady=5, sticky=tk.W)
-        self.num_predict_var = tk.StringVar(value="10")
+        self.num_predict_var = tk.StringVar(value="5")
         self.num_predict_spinbox = ttk.Spinbox(self.data_params_frame, from_=1, to=10, increment=1, textvariable=self.num_predict_var, width=5, wrap=True, state='readonly')
         self.num_predict_spinbox.grid(row=3, column=1, padx=5, pady=5, sticky=tk.W)
 
@@ -766,7 +836,7 @@ class App10eLotto:
         # Parametri su stessa riga se possibile
         param_frame_1 = ttk.Frame(self.model_params_frame); param_frame_1.grid(row=current_row, column=0, columnspan=3, sticky=tk.EW); current_row += 1
         ttk.Label(param_frame_1, text="Dropout:").pack(side=tk.LEFT, padx=(5,2))
-        self.dropout_var = tk.StringVar(value="0.30") # Leggermente ridotto
+        self.dropout_var = tk.StringVar(value="0.50") # Leggermente ridotto
         self.dropout_spinbox = ttk.Spinbox(param_frame_1, from_=0.0, to=0.8, increment=0.05, format="%.2f", textvariable=self.dropout_var, width=5, wrap=True, state='readonly')
         self.dropout_spinbox.pack(side=tk.LEFT, padx=(0,10))
         ttk.Label(param_frame_1, text="L1:").pack(side=tk.LEFT, padx=(5,2))
@@ -780,18 +850,18 @@ class App10eLotto:
 
         param_frame_2 = ttk.Frame(self.model_params_frame); param_frame_2.grid(row=current_row, column=0, columnspan=3, sticky=tk.EW); current_row += 1
         ttk.Label(param_frame_2, text="Max Epoche:").pack(side=tk.LEFT, padx=(5,2))
-        self.epochs_var = tk.StringVar(value="80") # Ridotto default
+        self.epochs_var = tk.StringVar(value="30") # Ridotto default
         self.epochs_spinbox = ttk.Spinbox(param_frame_2, from_=10, to=500, increment=10, textvariable=self.epochs_var, width=5, wrap=True, state='readonly')
         self.epochs_spinbox.pack(side=tk.LEFT, padx=(0,10))
         ttk.Label(param_frame_2, text="Batch Size:").pack(side=tk.LEFT, padx=(5,2))
-        self.batch_size_var = tk.StringVar(value="64") # Aumentato default
+        self.batch_size_var = tk.StringVar(value="32") # Aumentato default
         batch_values = [str(2**i) for i in range(4, 10)] # 16 a 512
         self.batch_size_combo = ttk.Combobox(param_frame_2, textvariable=self.batch_size_var, values=batch_values, width=5, state='readonly')
         self.batch_size_combo.pack(side=tk.LEFT, padx=(0,10))
 
         param_frame_3 = ttk.Frame(self.model_params_frame); param_frame_3.grid(row=current_row, column=0, columnspan=3, sticky=tk.EW); current_row += 1
         ttk.Label(param_frame_3, text="ES Patience:").pack(side=tk.LEFT, padx=(5,2))
-        self.patience_var = tk.StringVar(value="10") # Ridotto default
+        self.patience_var = tk.StringVar(value="15") # Ridotto default
         self.patience_spinbox = ttk.Spinbox(param_frame_3, from_=3, to=50, increment=1, textvariable=self.patience_var, width=4, wrap=True, state='readonly')
         self.patience_spinbox.pack(side=tk.LEFT, padx=(0,10))
         ttk.Label(param_frame_3, text="ES Min Delta:").pack(side=tk.LEFT, padx=(5,2))

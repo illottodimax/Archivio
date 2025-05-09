@@ -186,6 +186,67 @@ def open_superenalotto_module_helper(parent_root):
     else:
         messagebox.showwarning("Modulo Mancante", "Il modulo SuperEnalotto ('selotto_module.py') non è stato caricato correttamente.", parent=parent_root)
 
+# *** INIZIO AGGIUNTE PER MODULO Numerical Binary ***
+
+# Flag per sapere se il modulo Numerical Binary è stato caricato
+NUMERICAL_BINARY_MODULE_LOADED = False
+# Placeholder per la funzione di avvio del Numerical Binary
+launch_numerical_binary_func = None
+
+try:
+    # Assicurati che il file si chiami 'numerical_binary_module.py'
+    # e contenga la funzione 'launch_numerical_binary_window' definita FUORI dalle classi
+    from numerical_binary_module import launch_numerical_binary_window as imported_numerical_binary_launch_func
+
+    # Se l'importazione ha successo, assegna la funzione reale
+    launch_numerical_binary_func = imported_numerical_binary_launch_func
+    NUMERICAL_BINARY_MODULE_LOADED = True
+    print("Modulo Numerical Binary (numerical_binary_module.py) caricato con successo.")
+
+except ImportError as e:
+    # Se il modulo non viene trovato o c'è un errore nell'import
+    print(f"ATTENZIONE: Impossibile importare il modulo 'numerical_binary_module.py'. Errore: {e}")
+    # Definisci una funzione di fallback che mostra solo un errore
+    def fallback_launch_numerical_binary(parent):
+        messagebox.showerror("Errore Modulo",
+                             "Modulo Numerical Binary (numerical_binary_module.py) non trovato o contenente errori.\n"
+                             "Verificare che il file sia presente e corretto.",
+                             parent=parent)
+    launch_numerical_binary_func = fallback_launch_numerical_binary # Usa la funzione di fallback
+
+except Exception as e_gen:
+    # Per gestire altri errori imprevisti durante l'importazione
+     print(f"ERRORE GENERALE durante l'importazione del modulo Numerical Binary: {e_gen}")
+     print(traceback.format_exc())
+     # Definisci una funzione di fallback anche per errori generici
+     def fallback_launch_numerical_binary_err(parent):
+         messagebox.showerror("Errore Modulo",
+                              f"Errore imprevisto durante il caricamento del modulo Numerical Binary:\n{e_gen}",
+                              parent=parent)
+     launch_numerical_binary_func = fallback_launch_numerical_binary_err
+
+# --- Funzione Helper per Numerical Binary ---
+def open_numerical_binary_helper(parent_window):
+    """Chiama la funzione di lancio del modulo Numerical Binary (reale o fallback)."""
+    print("Tentativo di aprire la finestra Numerical Binary...")
+    if launch_numerical_binary_func: # Controlla se la funzione è stata definita (o è il fallback)
+        try:
+            # Esegui la funzione (passando la finestra principale come genitore)
+            launch_numerical_binary_func(parent_window)
+        except Exception as e_launch:
+             # Cattura errori che potrebbero verificarsi durante l'esecuzione della launch function
+             print(f"ERRORE durante l'esecuzione di launch_numerical_binary_func: {e_launch}")
+             print(traceback.format_exc())
+             messagebox.showerror("Errore Esecuzione Modulo",
+                                  f"Si è verificato un errore all'avvio del modulo Numerical Binary:\n{e_launch}",
+                                  parent=parent_window)
+    else:
+        # Questo caso limite non dovrebbe verificarsi se la logica sopra è corretta
+        messagebox.showerror("Errore Interno", "Funzione di avvio per Numerical Binary non definita.", parent=parent_window)
+
+# *** FINE AGGIUNTE PER MODULO Numerical Binary ***
+# *******************************************************************
+
 GITHUB_USER = "illottodimax"
 GITHUB_REPO = "Archivio"
 GITHUB_BRANCH = "main"
@@ -222,18 +283,20 @@ def set_seed(seed_value=42):
 set_seed()
    
 def carica_dati_grezzi(ruota):
-    """Carica i dati grezzi da GitHub, gestendo errori."""
+    """
+    Carica i dati grezzi da GitHub, gestendo errori e impedendo
+    che "NA" venga interpretato come NaN. Include debug temporaneo.
+    """
     file_name = FILE_RUOTE.get(ruota)
     if not file_name:
         logger.error(f"Abbreviazione ruota non trovata nel dizionario: {ruota}")
         return None
 
-    # Costruisci l'URL completo per il file raw specifico
     url = f"{BASE_GITHUB_URL.rstrip('/')}/{file_name}"
     logger.info(f"Tentativo di caricamento dati per {ruota} da GitHub URL: {url}")
 
     try:
-        response = requests.get(url, timeout=15) # Timeout di 15 secondi
+        response = requests.get(url, timeout=15)
         response.raise_for_status() # Controlla errori HTTP (404, 500, etc.)
         content = response.text
 
@@ -241,33 +304,76 @@ def carica_dati_grezzi(ruota):
              logger.warning(f"File scaricato da {url} per {ruota} è vuoto o contiene solo spazi.")
              return None
 
+        # --- MODIFICA CRUCIALE PER GESTIRE "NA" ---
         # Usa io.StringIO per leggere la stringa come file
-        df = pd.read_csv(io.StringIO(content), header=None, sep='\t', encoding='utf-8')
+        df = pd.read_csv(
+            io.StringIO(content),
+            header=None,              # Il file non ha header
+            sep='\t',                 # Separatore è tabulazione
+            encoding='utf-8',         # Specifica encoding
+            dtype={1: str},           # Specifica che la colonna 1 (Ruota) dovrebbe essere stringa
+            keep_default_na=False,    # NON interpretare "NA", "NaN" etc. come valori mancanti
+            na_values=['']            # Considera SOLO le stringhe vuote come valori mancanti (opzionale)
+        )
+        # --- FINE MODIFICA ---
+
+        # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+        # (Puoi commentare o rimuovere queste righe dopo aver verificato che funziona)
+        logger.info(f"DEBUG {ruota}: Info DataFrame DOPO lettura con keep_default_na=False:")
+        df_info_str = io.StringIO()
+        df.info(buf=df_info_str)
+        logger.info(f"DEBUG {ruota}:\n{df_info_str.getvalue()}")
+        # === FINE BLOCCO DEBUG TEMPORANEO ===
 
         expected_columns = 7 # Data, Ruota, Num1, Num2, Num3, Num4, Num5
         if df.shape[1] == expected_columns:
+             # Assegna nomi alle colonne
              df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]
-             # Verifica Consistenza Sigla (opzionale ma utile)
+
+             # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+             logger.info(f"DEBUG {ruota}: Valori unici in df['Ruota'] DOPO rinomina colonne: {df['Ruota'].unique()}")
+             # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+             # Verifica Consistenza Sigla
              sigle_nel_file = df['Ruota'].unique()
-             if len(sigle_nel_file) == 1 and sigle_nel_file[0].upper() != ruota.upper():
-                 logger.warning(f"Sigla nel file {file_name} ('{sigle_nel_file[0]}') != chiave usata ('{ruota}').")
-             elif len(sigle_nel_file) > 1:
-                  logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+
+             if sigle_nel_file.size > 0:
+                 # Estrai la prima (e si spera unica) sigla trovata
+                 sigla_letta = sigle_nel_file[0] # Ora DOVREBBE essere la stringa 'NA'
+
+                 # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+                 logger.info(f"DEBUG {ruota}: Valore sigla_letta estratto: {repr(sigla_letta)}") # repr() mostra se è stringa
+                 logger.info(f"DEBUG {ruota}: Tipo sigla_letta estratto: {type(sigla_letta)}")
+                 # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+                 # Confronto sigla (ora dovrebbe funzionare)
+                 if len(sigle_nel_file) == 1 and sigla_letta.upper() != ruota.upper():
+                     logger.warning(f"Sigla nel file {file_name} ('{sigla_letta}') != chiave usata ('{ruota}').")
+                 elif len(sigle_nel_file) > 1:
+                      logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+             else:
+                 logger.warning(f"Nessuna sigla trovata nella colonna 'Ruota' del file {file_name}.")
 
              logger.info(f"Dati caricati e colonne rinominate per {ruota} da GitHub.")
-             return df
+             return df # Restituisce il DataFrame caricato e validato
         else:
+             # Errore se il numero di colonne non è quello atteso
              logger.error(f"Formato colonne inatteso ({df.shape[1]}) in {file_name} da {url}. Attese {expected_columns}.")
-             try: logger.error(f"Prime righe:\n{df.head().to_string()}")
-             except Exception: logger.error("Impossibile mostrare prime righe.")
-             return None
+             try:
+                 # Prova a loggare le prime righe per aiutare nel debug
+                 logger.error(f"Prime righe:\n{df.head().to_string()}")
+             except Exception:
+                 logger.error("Impossibile mostrare prime righe.")
+             return None # Fallimento caricamento
 
+    # Gestione delle eccezioni durante il caricamento o parsing
     except requests.exceptions.Timeout:
         logger.error(f"Timeout (15s) durante connessione a {url} per {ruota}")
         return None
     except requests.exceptions.HTTPError as http_err:
          logger.error(f"Errore HTTP ({http_err.response.status_code}) da {url} per {ruota}: {http_err}")
-         if http_err.response.status_code == 404: logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
+         if http_err.response.status_code == 404:
+             logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
          return None
     except requests.exceptions.RequestException as req_err:
         logger.error(f"Errore di rete/connessione da {url} per {ruota}: {req_err}")
@@ -277,11 +383,27 @@ def carica_dati_grezzi(ruota):
         return None
     except pd.errors.ParserError as e:
         logger.error(f"Errore parsing Pandas del TSV da {url} per {ruota}: {e}")
-        try: logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
-        except NameError: logger.error("Contenuto non disponibile.")
+        try:
+            logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
+        except NameError: # 'content' potrebbe non essere definito se errore avviene prima
+            logger.error("Contenuto non disponibile.")
+        return None
+    except AttributeError as ae: # Cattura specifica per l'errore originale (ora improbabile)
+        sigla_debug = 'Non disponibile'
+        tipo_debug = 'Non disponibile'
+        # Controlla se le variabili esistono prima di accedervi nel log
+        if 'sigle_nel_file' in locals() and sigle_nel_file.size > 0:
+             sigla_debug = repr(sigle_nel_file[0])
+             tipo_debug = type(sigle_nel_file[0])
+        logger.error(f"!!! AttributeError ANCORA PRESENTE? per {ruota} da {url}.")
+        logger.error(f"Valore (sigla_letta): {sigla_debug}, Tipo: {tipo_debug}")
+        logger.exception(f"Dettagli errore (Traceback): {ae}") # Logga lo stack trace
         return None
     except Exception as e:
-        logger.exception(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}: {e}")
+        # Cattura qualsiasi altra eccezione imprevista
+        logger.error(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}:")
+        # Stampa il traceback completo nel log per aiutare a diagnosticare
+        logger.error(traceback.format_exc())
         return None
 
 def preprocessa_dati(df, start_date, end_date):
@@ -7114,6 +7236,79 @@ def esegui_script_legge_terzo():
     except FileNotFoundError:
         print("Errore: Python non trovato. Assicurati che Python sia installato e disponibile nel PATH.")
 
+def lancia_spie_dec():
+    """
+    Lancia lo script esterno ratiod.py.
+    """
+    script_name = "ratiod.py"
+    try:
+        print(f"Tentativo di lanciare: {sys.executable} {script_name}")
+        process = subprocess.Popen([sys.executable, script_name])
+        print(f"Script {script_name} lanciato con PID: {process.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name} non è stato trovato.")
+        messagebox.showerror("Errore", f"Script {script_name} non trovato!\nAssicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name}:\n{e}")
+
+# --- Funzione per il SECONDO nuovo pulsante (Spie Quind) ---
+def lancia_spie_quind():
+    """
+    Lancia lo script esterno ratioq.py.
+    """
+    script_name = "ratioq.py" # Nome dello script cambiato
+    try:
+        print(f"Tentativo di lanciare: {sys.executable} {script_name}")
+        process = subprocess.Popen([sys.executable, script_name])
+        print(f"Script {script_name} lanciato con PID: {process.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name} non è stato trovato.")
+        messagebox.showerror("Errore", f"Script {script_name} non trovato!\nAssicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name}:\n{e}")
+
+def lancia_ritardi_plus():  # <<< IL NOME È ESATTAMENTE QUESTO
+    """
+    Lancia lo script esterno ritardi_plus_analyzer.py usando subprocess.
+    """
+    script_name = "ritardi_plus_analyzer.py"  # Il file che contiene la tua RitardiPlusApp
+                                              # e che ha il suo if __name__ == "__main__":
+    try:
+        print(f"Tentativo di lanciare (subprocess): {sys.executable} {script_name}")
+        # Popen lancia lo script come un processo separato
+        process = subprocess.Popen([sys.executable, script_name])
+        print(f"Script {script_name} lanciato con PID: {process.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name} non è stato trovato.")
+        # È buona norma passare il 'parent' alla messagebox se possibile
+        # (es. la finestra principale della tua app)
+        messagebox.showerror("Errore",
+                             f"Script {script_name} non trovato!\n"
+                             f"Assicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name}:\n{e}")
+
+def lancia_rit_pos():
+    """
+    Lancia lo script esterno analizza_ruota_lotto.py usando subprocess.
+    """
+    script_name_rit_pos = "analizza_ruota_lotto.py"  # Nome del nuovo script esterno
+    try:
+        print(f"Tentativo di lanciare (subprocess): {sys.executable} {script_name_rit_pos}")
+        process_rit_pos = subprocess.Popen([sys.executable, script_name_rit_pos])
+        print(f"Script {script_name_rit_pos} lanciato con PID: {process_rit_pos.pid}")
+    except FileNotFoundError:
+        print(f"Errore: Lo script {script_name_rit_pos} non è stato trovato.")
+        messagebox.showerror("Errore",
+                             f"Script {script_name_rit_pos} non trovato!\n"
+                             f"Assicurati che sia nella stessa cartella dell'applicazione.")
+    except Exception as e:
+        print(f"Errore durante l'esecuzione di {script_name_rit_pos}: {e}")
+        messagebox.showerror("Errore", f"Errore nell'esecuzione di {script_name_rit_pos}:\n{e}")
+
 def esegui_pannello_estrazioni():
     """Avvia il modulo esterno del pannello estrazioni."""
     try:
@@ -7240,6 +7435,7 @@ def main():
     tab_10elotto = ttk.Frame(notebook)
     tab_lotto_analyzer = ttk.Frame(notebook)
     tab_superenalotto = ttk.Frame(notebook)
+    tab_numerical_binary = ttk.Frame(notebook)
 
     # Aggiunta schede originali
     notebook.add(tab_avatar, text="Presentazione")
@@ -7251,12 +7447,12 @@ def main():
     notebook.add(tab_10elotto, text="10 e Lotto Serale") 
     notebook.add(tab_lotto_analyzer, text="Lotto Analyzer")
     notebook.add(tab_superenalotto, text="SuperEnalotto") # Posizionata dopo Lotto Analyzer
-    
+    notebook.add(tab_numerical_binary, text="Numerical Binary")
 
     # ====================== SCHEDA PRINCIPALE (Tuo codice originale) ======================
     title_frame = tk.Frame(tab_main); title_frame.pack(pady=10, fill=tk.X); title_label = tk.Label(title_frame, text="𝐍𝐔𝐌𝐄𝐑𝐈𝐂𝐀𝐋 𝐄𝐌𝐏𝐀𝐓𝐇𝐘", fg="blue", font=("Arial", 24), bg="#ADD8E6"); title_label.pack(fill=tk.X)
     frame_salvataggio = tk.Frame(tab_main); frame_salvataggio.pack(pady=10, fill=tk.X)
-    btn_salva_risultati = tk.Button(frame_salvataggio, text="Salva Risultati", command=salva_risultati, bg="#FFDDC1", width=20); btn_salva_risultati.pack(side=tk.LEFT, padx=10)
+    # btn_salva_risultati = tk.Button(frame_salvataggio, text="Salva Risultati", command=salva_risultati, bg="#FFDDC1", width=20); btn_salva_risultati.pack(side=tk.LEFT, padx=10)
     btn_aggiorna_estrazioni = tk.Button(frame_salvataggio, text="Aggiornamento Estrazioni", command=esegui_aggiornamento, bg="#FFDDC1", width=20); btn_aggiorna_estrazioni.pack(side=tk.LEFT, padx=10)
     btn_carica_valuta_modello = tk.Button(frame_salvataggio, text="Carica e Valuta Modello", command=carica_e_valuta_modello, bg="green", fg="white", width=20); btn_carica_valuta_modello.pack(side=tk.LEFT, padx=10)
     btn_manage_license = tk.Button(frame_salvataggio, text="Gestione Licenza", command=gestisci_licenza, bg="#FFDDC1", width=20); btn_manage_license.pack(side=tk.LEFT, padx=10)
@@ -7283,11 +7479,15 @@ def main():
     btn_multi_ruota = tk.Button(start_frame, text="ANALISI MULTI-RUOTA", command=apri_selezione_multi_ruota, bg="#FF9900", fg="white", font=("Arial", 12, "bold"), width=30, height=2); btn_multi_ruota.pack(pady=5)
     # Assicurati che analisi_avanzata_completa sia definita o importata correttamente
     btn_analisi_avanzata = tk.Button(start_frame, text="ANALISI AVANZATA", command=analisi_avanzata_completa, bg="#9370DB", fg="white", font=("Arial", 12, "bold"), width=30, height=2); btn_analisi_avanzata.pack(pady=5)
-    btn_analisi_completa = tk.Button(frame_salvataggio, text="Analisi Completa", command=analisi_avanzata_completa, bg="#90EE90", fg="black", width=20); btn_analisi_completa.pack(side=tk.LEFT, padx=10)
-    btn_analisi_interpretabile = tk.Button(frame_salvataggio, text="Analisi Interpretabile", command=analisi_interpretabile, bg="#FFD700", fg="black", width=20); btn_analisi_interpretabile.pack(side=tk.LEFT, padx=10)
-    btn_numeri_spia = tk.Button(frame_salvataggio, text="Numeri Spia", command=esegui_script_numeri_spia, bg="#E6E6FA", fg="black", width=20); btn_numeri_spia.pack(side=tk.LEFT, padx=10)
-    btn_analizzatore_ritardi = tk.Button(frame_salvataggio, text="Analisi Ritardi", command=lambda: apri_analizzatore_ritardi(root, FILE_RUOTE), bg="#E6E6FA", fg="black", width=20); btn_analizzatore_ritardi.pack(side=tk.LEFT, padx=10)
-    btn_legge_terzo = tk.Button(frame_salvataggio, text="Legge del Terzo", command=esegui_script_legge_terzo, bg="#E6E6FA", fg="black", width=20); btn_legge_terzo.pack(side=tk.LEFT, padx=10)
+    btn_analisi_completa = tk.Button(frame_salvataggio, text="Analisi Completa", command=analisi_avanzata_completa, bg="#90EE90", fg="black", width=16); btn_analisi_completa.pack(side=tk.LEFT, padx=5)
+    btn_analisi_interpretabile = tk.Button(frame_salvataggio, text="Analisi Interpretabile", command=analisi_interpretabile, bg="#FFD700", fg="black", width=18); btn_analisi_interpretabile.pack(side=tk.LEFT, padx=5)
+    btn_numeri_spia = tk.Button(frame_salvataggio, text="Numeri Spia", command=esegui_script_numeri_spia, bg="#E6E6FA", fg="black", width=12); btn_numeri_spia.pack(side=tk.LEFT, padx=5)
+    btn_analizzatore_ritardi = tk.Button(frame_salvataggio, text="Analisi Ritardi", command=lambda: apri_analizzatore_ritardi(root, FILE_RUOTE), bg="#E6E6FA", fg="black", width=14); btn_analizzatore_ritardi.pack(side=tk.LEFT, padx=5)
+    btn_legge_terzo = tk.Button(frame_salvataggio, text="Legge del Terzo", command=esegui_script_legge_terzo, bg="#E6E6FA", fg="black", width=14); btn_legge_terzo.pack(side=tk.LEFT, padx=5)
+    btn_spie_dec = tk.Button(frame_salvataggio, text="Spie Dec", command=lancia_spie_dec, bg="#E6E6FA", fg="black", width=14); btn_spie_dec.pack(side=tk.LEFT, padx=5)
+    btn_spie_quind = tk.Button(frame_salvataggio, text="Spie Quind", command=lancia_spie_quind, bg="#E6E6FA", fg="black", width=14);  btn_spie_quind.pack(side=tk.LEFT, padx=5)
+    btn_ritardi_plus = tk.Button(frame_salvataggio, text="RitardiPlus", command=lancia_ritardi_plus, bg="#E6E6FA", fg="black", width=14); btn_ritardi_plus.pack(side=tk.LEFT, padx=5)
+    btn_rit_pos = tk.Button(frame_salvataggio, text="Rit Pos", command=lancia_rit_pos, bg="#E6E6FA", fg="black", width=14); btn_rit_pos.pack(side=tk.LEFT, padx=5)     
     frame_date = tk.LabelFrame(tab_main, text="Periodo di Analisi", padx=10, pady=10); frame_date.pack(pady=10, fill=tk.X)
     tk.Label(frame_date, text="Data di Inizio:", bg="#ADD8E6", fg="black", width=15).grid(row=0, column=0, padx=5, pady=5, sticky="e")
     entry_start_date = DateEntry(frame_date, width=15, date_pattern='yyyy/mm/dd', bg="#F0F0F0", fg="black"); entry_start_date.grid(row=0, column=1, padx=5, pady=5, sticky="w")
@@ -7612,6 +7812,39 @@ def main():
     superenalotto_descrizione.insert(tk.END, " • Verificare la previsione generata sulle estrazioni successive.")
     superenalotto_descrizione.config(state=tk.DISABLED) # Rendi non modificabile
     # =====================================================================
+
+    # >>>>> NUOVO: POPOLAMENTO SCHEDA NUMERICAL BINARY (tab_numerical_binary) <<<<<
+    nb_title = tk.Label(tab_numerical_binary, text="ANALISI NUMERICAL BINARY", font=("Arial", 18, "bold"), fg="navy", bg="#E6E6FA", pady=10)
+    nb_title.pack(fill=tk.X)
+    nb_frame = tk.Frame(tab_numerical_binary, bg="#F8F8FF", pady=20)
+    nb_frame.pack(fill=tk.BOTH, expand=True)
+    nb_info = tk.Label(nb_frame, text="Avvia il modulo per l'analisi delle sequenze binarie\n basate sui pattern verticali nel gioco del Lotto.", font=("Arial", 12), bg="#F8F8FF", pady=10, justify=tk.CENTER)
+    nb_info.pack()
+    # Controlla se il modulo è stato caricato correttamente
+    nb_button_state = tk.NORMAL if NUMERICAL_BINARY_MODULE_LOADED else tk.DISABLED
+    btn_avvia_nb = tk.Button(
+        nb_frame, # Widget padre corretto
+        text="Avvia Modulo Numerical Binary",
+        command=lambda: open_numerical_binary_helper(root), # Chiama l'helper corretto
+        state=nb_button_state, # Stato basato sul caricamento
+        bg="#6A5ACD", # Colore esempio
+        fg="white",
+        font=("Arial", 14, "bold"),
+        width=30, # Larghezza consistente
+        height=2
+    )
+    btn_avvia_nb.pack(pady=20) # Posiziona il bottone
+    nb_descrizione = tk.Text(nb_frame, width=80, height=10, bg="#F0F0F0", font=("Arial", 10))
+    nb_descrizione.pack(pady=20)
+    nb_descrizione.insert(tk.END, "Questo modulo ('numerical_binary_module.py') permette di:\n\n")
+    nb_descrizione.insert(tk.END, " • Caricare archivi storici del Lotto da GitHub.\n")
+    nb_descrizione.insert(tk.END, " • Convertire i numeri estratti in rappresentazione binaria.\n")
+    nb_descrizione.insert(tk.END, " • Analizzare pattern verticali di una data lunghezza (H).\n")
+    nb_descrizione.insert(tk.END, " • Identificare i pattern più sbilanciati (0 vs 1) su base storica.\n")
+    nb_descrizione.insert(tk.END, " • Generare una previsione binaria (e decimale) per le 5 posizioni.\n")
+    nb_descrizione.insert(tk.END, " • Eseguire backtesting storico per validare l'efficacia del metodo.")
+    nb_descrizione.config(state=tk.DISABLED)
+    # ====================== FINE SCHEDA NUMERICAL BINARY ======================
 
 
     # --- Configurazione finale e avvio mainloop (INVARIATO) ---
