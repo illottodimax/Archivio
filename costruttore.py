@@ -141,8 +141,8 @@ def analizza_copertura_combinata(storico, top_metodi_info, ruote_gioco_seleziona
             op_str = met_details['operazione']; operando = met_details['operando_fisso']
             if op_str not in op_func_cache:
                 if app_logger: app_logger(f"WARN: Operazione {op_str} non in cache per analisi combinata."); 
-                continue # Salta questa operazione se non è in cache
-            op_func = op_func_cache[op_str] # Prendi dall'inizio del loop
+                continue 
+            op_func = op_func_cache[op_str] 
             try: valore_operazione = op_func(numero_base, operando)
             except ZeroDivisionError: continue 
             ambata_prevista = regola_fuori_90(valore_operazione)
@@ -174,7 +174,6 @@ def trova_migliori_ambate_e_abbinamenti(storico, ruota_calcolo, pos_estratto_cal
     for op_str in OPERAZIONI:
         for operando in range(1, 91):
             metodi_processati += 1
-            # if metodi_processati % 10 == 0 or metodi_processati == tot_metodi_testati : log_message(f"  Testando metodo {metodi_processati}/{tot_metodi_testati}...", end='\r', flush=True) # Commentato
             ambata_fissa_prodotta, successi, tentativi, applicazioni_vincenti_dett = analizza_metodo_sommativo_base(storico, ruota_calcolo, pos_estratto_calcolo, op_str, operando, ruote_gioco_selezionate, lookahead, indice_mese_filtro)
             if tentativi >= min_tentativi_per_ambata:
                 frequenza = successi / tentativi if tentativi > 0 else 0
@@ -249,32 +248,29 @@ def analizza_metodo_complesso_specifico(storico, definizione_metodo,
     successi = 0
     tentativi = 0
     applicazioni_vincenti = []
-    ambate_prodotte_dal_metodo_corrente = Counter() # Per contare le frequenze delle ambate prodotte
+    ambate_prodotte_dal_metodo_corrente = Counter() 
 
     for i in range(len(storico) - lookahead):
         estrazione_corrente = storico[i]
         if indice_mese_filtro and estrazione_corrente['indice_mese'] != indice_mese_filtro:
             continue
 
-        # Calcola il valore grezzo del metodo per l'estrazione corrente
         valore_calcolato_raw = calcola_valore_metodo_complesso(estrazione_corrente, definizione_metodo, app_logger)
 
-        if valore_calcolato_raw is None: # Metodo non applicabile (es. estratto mancante)
+        if valore_calcolato_raw is None: 
             continue 
         
         ambata_prevista_per_questa_applicazione = regola_fuori_90(valore_calcolato_raw)
         
-        # Incrementa il conteggio per questa ambata specifica
         ambate_prodotte_dal_metodo_corrente[ambata_prevista_per_questa_applicazione] += 1
         
-        tentativi += 1 # Il metodo è stato applicato e ha prodotto un'ambata
+        tentativi += 1 
         
         trovato_successo_per_questa_applicazione = False
         dettagli_vincita_per_tentativo = []
 
-        # Verifica il successo nelle estrazioni future (lookahead)
         for k_lookahead in range(1, lookahead + 1):
-            if i + k_lookahead >= len(storico): # Fine dello storico
+            if i + k_lookahead >= len(storico): 
                 break 
             
             estrazione_futura = storico[i + k_lookahead]
@@ -282,7 +278,7 @@ def analizza_metodo_complesso_specifico(storico, definizione_metodo,
             for ruota_verifica in ruote_gioco_selezionate:
                 if ambata_prevista_per_questa_applicazione in estrazione_futura.get(ruota_verifica, []):
                     if not trovato_successo_per_questa_applicazione:
-                        successi += 1 # Conta il successo solo una volta per questa applicazione del metodo
+                        successi += 1 
                         trovato_successo_per_questa_applicazione = True
                     
                     dettagli_vincita_per_tentativo.append({
@@ -292,7 +288,6 @@ def analizza_metodo_complesso_specifico(storico, definizione_metodo,
                         "colpo_riscontro": k_lookahead
                     })
             
-            # Se gioco su ruota secca e ho trovato, interrompo la ricerca nei colpi successivi per questa applicazione
             if trovato_successo_per_questa_applicazione and len(ruote_gioco_selezionate) == 1:
                 break 
         
@@ -300,19 +295,17 @@ def analizza_metodo_complesso_specifico(storico, definizione_metodo,
             applicazioni_vincenti.append({
                 "data_applicazione": estrazione_corrente['data'],
                 "valore_calcolato_raw": valore_calcolato_raw,
-                "ambata_prevista": ambata_prevista_per_questa_applicazione, # Ambata di questa specifica applicazione
+                "ambata_prevista": ambata_prevista_per_questa_applicazione, 
                 "riscontri": dettagli_vincita_per_tentativo
             })
             
-    # Determina l'ambata più frequentemente prodotta da questo metodo
     ambata_piu_frequente_del_metodo = None
-    if ambate_prodotte_dal_metodo_corrente: # Se il counter non è vuoto
-        # Prendi l'ambata (chiave) che ha il conteggio più alto
+    if ambate_prodotte_dal_metodo_corrente: 
         ambata_piu_frequente_del_metodo = ambate_prodotte_dal_metodo_corrente.most_common(1)[0][0]
             
     return ambata_piu_frequente_del_metodo, successi, tentativi, applicazioni_vincenti
 
-def analizza_abbinamenti_per_metodo_complesso(applicazioni_vincenti_metodo_complesso, ambata_target_del_metodo, app_logger=None): # Questa è la funzione che mancava o era fuori posto
+def analizza_abbinamenti_per_metodo_complesso(applicazioni_vincenti_metodo_complesso, ambata_target_del_metodo, app_logger=None): 
     if not applicazioni_vincenti_metodo_complesso: 
         return {"ambo": [], "terno": [], "quaterna": [], "cinquina": [], "eventi_abbinamento_analizzati": 0}
     abbinamenti_per_ambo = Counter(); abbinamenti_per_terno = Counter(); abbinamenti_per_quaterna = Counter(); abbinamenti_per_cinquina = Counter()
@@ -414,14 +407,12 @@ def trova_miglior_correttore_per_metodo_complesso(storico, definizione_metodo_ba
                                                   app_logger=None):
     def log_message(msg, end='\n', flush=False):
         if app_logger: app_logger(msg, end=end, flush=flush)
-        # else: print(msg, end=end, flush=flush) # Evita print se non c'è logger
 
     log_message("\nInizio ricerca correttori per metodo complesso...")
     risultati_correttori = []
     
     operazioni_da_testare_per_collegamento = ['+', '-', '*'] 
 
-    # --- Ricerca Fisso Correttore ---
     if cerca_fisso:
         log_message("  Ricerca fissi correttori...")
         tot_fissi_da_testare = 90 * len(operazioni_da_testare_per_collegamento)
@@ -429,7 +420,7 @@ def trova_miglior_correttore_per_metodo_complesso(storico, definizione_metodo_ba
         for op_collegamento in operazioni_da_testare_per_collegamento:
             for valore_fisso_correttore in range(1, 91):
                 fissi_processati_count += 1
-                if fissi_processati_count % 30 == 0 or fissi_processati_count == tot_fissi_da_testare: # Aggiorna meno frequentemente
+                if fissi_processati_count % 30 == 0 or fissi_processati_count == tot_fissi_da_testare: 
                     log_message(f"    Testando fisso correttore {fissi_processati_count}/{tot_fissi_da_testare}...", end='\r', flush=True)
 
                 termine_correttore_attuale = {'tipo_termine': 'fisso', 'valore_fisso': valore_fisso_correttore}
@@ -437,40 +428,39 @@ def trova_miglior_correttore_per_metodo_complesso(storico, definizione_metodo_ba
                 try:
                     definizione_metodo_esteso = costruisci_metodo_esteso(definizione_metodo_base, op_collegamento, termine_correttore_attuale)
                 except ValueError as e:
-                    # Questo errore da costruisci_metodo_esteso è improbabile se definizione_metodo_base è già validata
                     if app_logger: app_logger(f"WARN: Errore costruzione metodo esteso con fisso {valore_fisso_correttore} op {op_collegamento}: {e}")
                     continue
 
-                # Analizza il metodo esteso
-                ambata_prodotta_estesa, successi, tentativi, _ = analizza_metodo_complesso_specifico(
+                # MODIFICA: Recupera applicazioni_vincenti_estese
+                ambata_prodotta_estesa, successi, tentativi, applicazioni_vincenti_estese = analizza_metodo_complesso_specifico(
                     storico, definizione_metodo_esteso, ruote_gioco_selezionate, 
-                    lookahead, indice_mese_filtro, app_logger=None # Passa None per evitare log verbosi interni
+                    lookahead, indice_mese_filtro, app_logger=None 
                 )
 
-                if tentativi >= min_tentativi_per_correttore and successi > 0: # Considera solo se ci sono successi
+                if tentativi >= min_tentativi_per_correttore and successi > 0: 
                     frequenza = successi / tentativi
                     risultati_correttori.append({
                         'metodo_esteso_def': definizione_metodo_esteso,
                         'tipo_correttore': 'Fisso',
                         'dettaglio_correttore_str': str(valore_fisso_correttore),
                         'operazione_collegamento': op_collegamento,
-                        'ambata_risultante_metodo_esteso': ambata_prodotta_estesa, # <-- AMBATA OTTENUTA
+                        'ambata_risultante_metodo_esteso': ambata_prodotta_estesa,
                         'successi': successi,
                         'tentativi': tentativi,
-                        'frequenza': frequenza
+                        'frequenza': frequenza,
+                        'applicazioni_vincenti_metodo_esteso': applicazioni_vincenti_estese # AGGIUNTO
                     })
-        log_message("\n    Completata ricerca fissi correttori." + " "*50) # Spazi per sovrascrivere la riga di progresso
+        log_message("\n    Completata ricerca fissi correttori." + " "*50) 
 
-    # --- Ricerca Estratto Correttore ---
     if cerca_estratto:
         log_message("  Ricerca estratti correttori...")
         tot_estratti_da_testare = len(RUOTE) * 5 * len(operazioni_da_testare_per_collegamento)
         estratti_processati_count = 0
         for op_collegamento in operazioni_da_testare_per_collegamento:
             for ruota_correttore in RUOTE:
-                for pos_correttore in range(5): # Posizioni 0-4
+                for pos_correttore in range(5): 
                     estratti_processati_count +=1
-                    if estratti_processati_count % 50 == 0 or estratti_processati_count == tot_estratti_da_testare: # Aggiorna meno frequentemente
+                    if estratti_processati_count % 50 == 0 or estratti_processati_count == tot_estratti_da_testare: 
                         log_message(f"    Testando estratto correttore {estratti_processati_count}/{tot_estratti_da_testare}...", end='\r', flush=True)
 
                     termine_correttore_attuale = {'tipo_termine': 'estratto', 'ruota': ruota_correttore, 'posizione': pos_correttore}
@@ -480,7 +470,8 @@ def trova_miglior_correttore_per_metodo_complesso(storico, definizione_metodo_ba
                         if app_logger: app_logger(f"WARN: Errore costruzione metodo esteso con estratto {ruota_correttore}[{pos_correttore+1}] op {op_collegamento}: {e}")
                         continue
                         
-                    ambata_prodotta_estesa, successi, tentativi, _ = analizza_metodo_complesso_specifico(
+                    # MODIFICA: Recupera applicazioni_vincenti_estese
+                    ambata_prodotta_estesa, successi, tentativi, applicazioni_vincenti_estese = analizza_metodo_complesso_specifico(
                         storico, definizione_metodo_esteso, ruote_gioco_selezionate, 
                         lookahead, indice_mese_filtro, app_logger=None 
                     )
@@ -492,14 +483,14 @@ def trova_miglior_correttore_per_metodo_complesso(storico, definizione_metodo_ba
                             'tipo_correttore': 'Estratto',
                             'dettaglio_correttore_str': f"{ruota_correttore}[{pos_correttore+1}]",
                             'operazione_collegamento': op_collegamento,
-                            'ambata_risultante_metodo_esteso': ambata_prodotta_estesa, # <-- AMBATA OTTENUTA
+                            'ambata_risultante_metodo_esteso': ambata_prodotta_estesa, 
                             'successi': successi,
                             'tentativi': tentativi,
-                            'frequenza': frequenza
+                            'frequenza': frequenza,
+                            'applicazioni_vincenti_metodo_esteso': applicazioni_vincenti_estese # AGGIUNTO
                         })
-        log_message("\n    Completata ricerca estratti correttori." + " "*50) # Spazi per sovrascrivere
+        log_message("\n    Completata ricerca estratti correttori." + " "*50) 
            
-    # Ordina i risultati e restituisci
     risultati_correttori.sort(key=lambda x: (x['frequenza'], x['successi']), reverse=True)
     log_message("Ricerca correttori per metodo complesso completata.")
     return risultati_correttori
@@ -509,7 +500,7 @@ class LottoAnalyzerApp:
     def __init__(self, master):
         self.master = master
         master.title("Costruttore Metodi Lotto Avanzato")
-        master.geometry("850x5000") 
+        master.geometry("850x700") # Aumentata un po' l'altezza per più output
 
         self.cartella_dati_var = tk.StringVar()
         self.ruota_calcolo_var = tk.StringVar(value=RUOTE[0]) 
@@ -571,7 +562,7 @@ class LottoAnalyzerApp:
         self.btn_pulisci_output = tk.Button(output_controls_frame, text="Pulisci Output", command=self._clear_output_area_manual)
         self.btn_pulisci_output.pack(side=tk.LEFT, padx=10) 
         
-        self.output_text_area = scrolledtext.ScrolledText(master, wrap=tk.WORD, width=90, height=20, font=("Courier New", 9))
+        self.output_text_area = scrolledtext.ScrolledText(master, wrap=tk.WORD, width=90, height=25, font=("Courier New", 9)) # Aumentata altezza
         self.output_text_area.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
         self.output_text_area.config(state=tk.DISABLED)
 
@@ -757,7 +748,7 @@ class LottoAnalyzerApp:
         self.output_text_area.config(state=tk.NORMAL)
         self.output_text_area.delete('1.0', tk.END)
         self.output_text_area.config(state=tk.DISABLED)
-        print("DEBUG: Area output pulita manualmente.") 
+        print("DEBUG: Area output pulita manually.") 
 
     def _carica_e_valida_storico_comune(self):
         cartella_dati = self.cartella_dati_var.get()
@@ -855,7 +846,6 @@ class LottoAnalyzerApp:
         except Exception as e: self._log_to_gui(f"Errore apertura metodo complesso: {e}"); messagebox.showerror("Errore Apertura", f"Impossibile aprire:\n{e}")
 
     def avvia_analisi_metodi_semplici(self):
-        # self._clear_output_area_manual() # Lasciato commentato per accodare
         self._log_to_gui("\n" + "="*50 + "\nAVVIO RICERCA METODI SEMPLICI\n" + "="*50)
         storico_per_analisi = self._carica_e_valida_storico_comune()
         if not storico_per_analisi: return
@@ -899,7 +889,6 @@ class LottoAnalyzerApp:
         finally: self.master.config(cursor="")
 
     def avvia_analisi_metodo_complesso(self):
-        # self._clear_output_area_manual() 
         self._log_to_gui("\n" + "="*50 + "\nAVVIO ANALISI METODO COMPLESSO BASE\n" + "="*50)
         if not self.definizione_metodo_complesso_attuale: messagebox.showerror("Errore Input", "Definire almeno un componente."); self._log_to_gui("ERRORE: Metodo complesso non definito."); return
         if self.definizione_metodo_complesso_attuale[-1].get('operazione_successiva') != '=': messagebox.showerror("Errore Input Metodo", "Metodo deve terminare con '='."); self._log_to_gui("ERRORE: Metodo non terminato."); return
@@ -919,12 +908,11 @@ class LottoAnalyzerApp:
                 frequenza_metodo = successi / tentativi if tentativi > 0 else 0
                 self._log_to_gui(f"Metodo: {metodo_str_display}\nFreq: {frequenza_metodo:.2%} ({successi}/{tentativi})")
                 if successi > 0:
-                    conta_ambate = Counter(app_vinc['ambata_prevista'] for app_vinc in applicazioni_vincenti)
-                    if conta_ambate: ambata_target = conta_ambate.most_common(1)[0][0]; self._log_to_gui(f"Ambata più frequente: {ambata_target}")
-                    else: self._log_to_gui("Nessuna ambata prodotta consistentemente."); ambata_target = None
-                    if ambata_target:
+                    # ambata_test è già l'ambata più frequente calcolata da analizza_metodo_complesso_specifico
+                    ambata_target = ambata_test 
+                    if ambata_target is not None:
+                        self._log_to_gui(f"Ambata più frequente: {ambata_target}")
                         abbinamenti = analizza_abbinamenti_per_metodo_complesso(applicazioni_vincenti, ambata_target, self._log_to_gui)
-                        # Qui la logica per stampare gli abbinamenti
                         eventi_abbinamento = abbinamenti.get("eventi_abbinamento_analizzati", 0)
                         if eventi_abbinamento > 0:
                             self._log_to_gui(f"  Analizzati {eventi_abbinamento} eventi di vincita per abbinamenti con ambata '{ambata_target}':")
@@ -940,13 +928,14 @@ class LottoAnalyzerApp:
                                             mostrati +=1
                                     if mostrati == 0: self._log_to_gui(f"      Nessun abbinamento significativo per {tipo_sorte.upper()}.")
                         else: self._log_to_gui(f"  Nessun caso di successo del metodo ha prodotto l'ambata target '{ambata_target}' per analizzare abbinamenti.")
+                    else:
+                         self._log_to_gui("Nessuna ambata prodotta consistentemente dal metodo.")
                 else: self._log_to_gui("Il metodo non ha prodotto successi.")
             self._log_to_gui("\n--- Analisi Metodo Complesso Base Completata ---"); messagebox.showinfo("Analisi Completata", "Analisi Metodo Complesso Base terminata.")
         except Exception as e: messagebox.showerror("Errore Analisi Complessa", f"Errore: {e}"); self._log_to_gui(f"ERRORE ANALISI: {e}"); import traceback; self._log_to_gui(traceback.format_exc())
         finally: self.master.config(cursor="")
 
     def avvia_ricerca_correttore(self):
-        # self._clear_output_area_manual() # Decommenta se vuoi pulire l'output prima di questa analisi
         self._log_to_gui("\n" + "="*50 + "\nAVVIO RICERCA CORRETTORE PER METODO COMPLESSO\n" + "="*50)
 
         if not self.definizione_metodo_complesso_attuale:
@@ -954,7 +943,6 @@ class LottoAnalyzerApp:
             self._log_to_gui("ERRORE: Metodo Base non definito.")
             return
         
-        # Assicurati che il metodo base sia terminato correttamente
         if self.definizione_metodo_complesso_attuale[-1].get('operazione_successiva') != '=':
             messagebox.showerror("Errore Input", "Il Metodo Base deve essere terminato con l'operazione '=' prima di cercare un correttore.")
             self._log_to_gui("ERRORE: Metodo Base non terminato correttamente con '='.")
@@ -962,13 +950,12 @@ class LottoAnalyzerApp:
 
         storico_per_analisi = self._carica_e_valida_storico_comune()
         if not storico_per_analisi:
-            return # Messaggio e log già gestiti da _carica_e_valida_storico_comune
+            return 
 
         ruote_gioco, lookahead, indice_mese = self._get_parametri_gioco_comuni()
         if ruote_gioco is None: 
-            return # Messaggio e log già gestiti da _get_parametri_gioco_comuni
+            return 
        
-        # Per ora, min_tentativi_correttore è fisso. Potrebbe diventare un input della GUI.
         min_tentativi_correttore = 5 
 
         metodo_base_str = "".join(self._format_componente_per_display(comp) for comp in self.definizione_metodo_complesso_attuale)
@@ -980,16 +967,13 @@ class LottoAnalyzerApp:
             self.master.config(cursor="watch")
             self.master.update_idletasks()
 
-            # È cruciale passare una copia profonda del metodo base, perché 
-            # costruisci_metodo_esteso lo modifica internamente (anche se lavora su una copia passata).
-            # La definizione originale dell'utente non deve essere alterata.
             metodo_base_per_ricerca = [dict(comp) for comp in self.definizione_metodo_complesso_attuale]
 
             risultati_correttori = trova_miglior_correttore_per_metodo_complesso(
                 storico=storico_per_analisi,
                 definizione_metodo_base=metodo_base_per_ricerca, 
-                cerca_fisso=True,         # Parametro per decidere se cercare fissi
-                cerca_estratto=True,      # Parametro per decidere se cercare estratti
+                cerca_fisso=True,        
+                cerca_estratto=True,     
                 ruote_gioco_selezionate=ruote_gioco,
                 lookahead=lookahead,
                 indice_mese_filtro=indice_mese,
@@ -1001,21 +985,62 @@ class LottoAnalyzerApp:
             if not risultati_correttori:
                 self._log_to_gui("Nessun correttore valido trovato che migliori significativamente il metodo base o soddisfi i criteri minimi.")
             else:
-                self._log_to_gui(f"Trovati {len(risultati_correttori)} potenziali correttori. Mostro i migliori (max 10):")
-                for i, res_corr in enumerate(risultati_correttori[:10]): # Mostra i top 10 o meno
-                    metodo_esteso_str_display = "".join(self._format_componente_per_display(comp) for comp in res_corr['metodo_esteso_def'])
+                # MODIFICA: Mostra solo il miglior correttore e i suoi abbinamenti, o i top N se desiderato.
+                # Per ora, mostriamo il migliore.
+                self._log_to_gui(f"Trovati {len(risultati_correttori)} potenziali correttori. Mostro il migliore con analisi abbinamenti:")
+                
+                res_corr = risultati_correttori[0] # Prendiamo solo il primo (il migliore)
+                
+                metodo_esteso_str_display = "".join(self._format_componente_per_display(comp) for comp in res_corr['metodo_esteso_def'])
+                
+                self._log_to_gui(f"\n1. MIGLIOR CORRETTORE: Tipo '{res_corr['tipo_correttore']}', Dettaglio '{res_corr.get('dettaglio_correttore_str', '')}', Operazione di Collegamento '{res_corr['operazione_collegamento']}'")
+                self._log_to_gui(f"   Metodo Esteso Risultante: {metodo_esteso_str_display}")
+                
+                ambata_estesa_output = res_corr.get('ambata_risultante_metodo_esteso', 'N/D')
+                self._log_to_gui(f"   Ambata Prodotta dal Metodo Esteso: {ambata_estesa_output}")
+                
+                self._log_to_gui(f"   Frequenza Successo (Metodo Esteso): {res_corr['frequenza']:.2%} ({res_corr['successi']}/{res_corr['tentativi']} casi)")
+                
+                # --- INIZIO SEZIONE ABBINAMENTI PER IL MIGLIOR CORRETTORE ---
+                ambata_target_per_abbinamenti = res_corr.get('ambata_risultante_metodo_esteso')
+                applicazioni_vincenti_del_metodo_esteso = res_corr.get('applicazioni_vincenti_metodo_esteso')
+
+                if ambata_target_per_abbinamenti is not None and applicazioni_vincenti_del_metodo_esteso:
+                    self._log_to_gui(f"   --- Analisi Abbinamenti per ambata '{ambata_target_per_abbinamenti}' (Miglior Metodo Esteso) ---")
                     
-                    self._log_to_gui(f"\n{i+1}. Correttore Suggerito: Tipo '{res_corr['tipo_correttore']}', Dettaglio '{res_corr.get('dettaglio_correttore_str', '')}', Operazione di Collegamento '{res_corr['operazione_collegamento']}'")
-                    self._log_to_gui(f"   Metodo Esteso Risultante: {metodo_esteso_str_display}")
+                    abbinamenti_calcolati = analizza_abbinamenti_per_metodo_complesso(
+                        applicazioni_vincenti_del_metodo_esteso,
+                        ambata_target_per_abbinamenti, 
+                        app_logger=self._log_to_gui
+                    )
                     
-                    ambata_estesa_output = res_corr.get('ambata_risultante_metodo_esteso', 'N/D')
-                    self._log_to_gui(f"   Ambata Prodotta dal Metodo Esteso: {ambata_estesa_output}")
-                    
-                    self._log_to_gui(f"   Frequenza Successo (Metodo Esteso): {res_corr['frequenza']:.2%} ({res_corr['successi']}/{res_corr['tentativi']} casi)")
-                    
-                    # Se si volesse, qui si potrebbero analizzare gli abbinamenti per l'ambata_estesa_output
-                    # usando le applicazioni_vincenti che si potrebbero ottenere da una chiamata mirata
-                    # ad analizza_metodo_complesso_specifico con la definizione_estesa.
+                    eventi_abbinamento = abbinamenti_calcolati.get("eventi_abbinamento_analizzati", 0)
+                    if eventi_abbinamento > 0:
+                        self._log_to_gui(f"     Basato su {eventi_abbinamento} sortite vincenti dell'ambata '{ambata_target_per_abbinamenti}':")
+                        for tipo_sorte, dati_sorte_lista in abbinamenti_calcolati.items():
+                            if tipo_sorte == "eventi_abbinamento_analizzati": continue 
+                            if dati_sorte_lista: 
+                                self._log_to_gui(f"       Migliori Abbinamenti per {tipo_sorte.upper().replace('_', ' ')}:")
+                                mostrati_per_sorte = 0
+                                for ab_info in dati_sorte_lista:
+                                    if ab_info['conteggio'] > 0:
+                                        numeri_ab_str = ", ".join(map(str, sorted(ab_info['numeri'])))
+                                        if tipo_sorte == "ambo":
+                                            txt_numeri_abbinati = f"Numero abbinato: {numeri_ab_str}"
+                                        else: 
+                                            txt_numeri_abbinati = f"Numeri abbinati: [{numeri_ab_str}]"
+
+                                        self._log_to_gui(f"         - {txt_numeri_abbinati} -> Freq. {ab_info['frequenza']:.2%} (Conteggio: {ab_info['conteggio']})")
+                                        mostrati_per_sorte += 1
+                                if mostrati_per_sorte == 0:
+                                    self._log_to_gui(f"         Nessun abbinamento significativo trovato per {tipo_sorte.upper()}.")
+                    else:
+                        self._log_to_gui(f"     Nessun caso di successo del metodo esteso ha prodotto l'ambata target '{ambata_target_per_abbinamenti}' in modo utile per analizzare gli abbinamenti, o non ci sono state applicazioni vincenti sufficienti.")
+                elif ambata_target_per_abbinamenti is None:
+                    self._log_to_gui(f"   Impossibile determinare un'ambata consistente per il metodo esteso, quindi non si analizzano abbinamenti.")
+                else: 
+                    self._log_to_gui(f"   Non ci sono state applicazioni vincenti registrate per il metodo esteso per analizzare abbinamenti.")
+                # --- FINE SEZIONE ABBINAMENTI ---
            
             self._log_to_gui("\n--- Ricerca Correttore Completata ---")
             messagebox.showinfo("Ricerca Correttore", "Ricerca del correttore terminata. Vedi risultati nell'area sottostante.")
@@ -1029,7 +1054,6 @@ class LottoAnalyzerApp:
             self.master.config(cursor="")
 
     def avvia_verifica_giocata(self):
-        # self._clear_output_area_manual()  
         self._log_to_gui("\n" + "="*50 + "\nAVVIO VERIFICA GIOCATA MANUALE\n" + "="*50)
         numeri_str = self.numeri_verifica_var.get()
         try:
