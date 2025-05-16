@@ -623,9 +623,22 @@ urls_config = {
     "ScottishCH_2425": "https://www.football-data.co.uk/mmz4281/2425/SC1.csv", 
     "ScottishL1_2425": "https://www.football-data.co.uk/mmz4281/2425/SC2.csv", 
     "ScottishL2_2425": "https://www.football-data.co.uk/mmz4281/2425/SC3.csv", 
-    # Aggiungi qui anche le stagioni 23/24 se vuoi includerle per l'addestramento
-    # "SerieA_2324": "https://www.football-data.co.uk/mmz4281/2324/I1.csv",
-    # etc.
+    "Usa_2425": "https://www.football-data.co.uk/new/USA.csv",
+    "Svizzera_2425": "https://www.football-data.co.uk/new/SWZ.csv",
+    "Svezia_2425": "https://www.football-data.co.uk/new/SWE.csv",
+    "Russia_2425": "https://www.football-data.co.uk/new/RUS.csv",
+    "Romania_2425": "https://www.football-data.co.uk/new/ROU.csv",
+    "Polonia_2425": "https://www.football-data.co.uk/new/POL.csv",
+    "Norvegia_2425": "https://www.football-data.co.uk/new/NOR.csv",
+    "Messico_2425": "https://www.football-data.co.uk/new/MEX.csv",
+    "Giappone_2425": "https://www.football-data.co.uk/new/JPN.csv",
+    "Irlanda_2425": "https://www.football-data.co.uk/new/IRL.csv",
+    "Finlandia_2425": "https://www.football-data.co.uk/new/FIN.csv",
+    "Danimarca_2425": "https://www.football-data.co.uk/new/DNK.csv",
+    "Cina_2425": "https://www.football-data.co.uk/new/CHN.csv",
+    "Brasile_2425": "https://www.football-data.co.uk/new/BRA.csv",
+    "Argentina_2425": "https://www.football-data.co.uk/new/ARG.csv",
+    "Austria_2425": "https://www.football-data.co.uk/new/AUT.csv",
 }
 
 root = tk.Tk()
