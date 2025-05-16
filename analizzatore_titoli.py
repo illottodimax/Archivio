@@ -1,6 +1,7 @@
 
 import pandas as pd
 import tkinter as tk
+import pandas_ta as ta
 import numpy as np
 import matplotlib.pyplot as plt
 import yfinance as yf
@@ -67,6 +68,25 @@ class Config:
     moving_averages: MovingAveragesConfig = field(default_factory=MovingAveragesConfig)
     rsi: RSIConfig = field(default_factory=RSIConfig)
     screening_criteria: ScreeningCriteriaConfig = field(default_factory=ScreeningCriteriaConfig)
+
+    # ---- NUOVI CAMPI PER LO SCORING TECNICO DELLE AZIONI ----
+    base_technical_score: float = 50.0 # Punteggio di partenza, reso float
+    technical_signal_weights: Dict[str, float] = field(default_factory=lambda: {
+        'golden_cross': 15.0,
+        'death_cross': -15.0,
+        'rsi_oversold': 12.0,
+        'rsi_overbought': -12.0,
+        'price_above_sma_short': 3.0,
+        'price_below_sma_short': -2.0,
+        'price_above_sma_long': 8.0,
+        'price_below_sma_long': -5.0,
+        'macd_bullish_cross': 12.0,
+        'macd_bearish_cross': -12.0,
+        'macd_above_zero': 5.0,
+        'macd_below_zero': -3.0,
+        'price_touch_bb_lower': 7.0, # Toccato/rotto BB inferiore
+        'price_touch_bb_upper': -7.0 # Toccato/rotto BB superiore
+    })
 
 # ---- FUNZIONI DI UTILITY CORE (Logica di Analisi) ----
 
@@ -238,67 +258,116 @@ def fetch_etf_info(symbol: str) -> Dict:
 def analyze_single_etf(symbol: str, config: Config) -> Dict:
     logging.info(f"Analisi ETF {symbol} in corso...")
     
-    df_historical = fetch_historical_data(symbol, config.lookback_period) # Riutilizza la tua funzione robusta
-    etf_info = fetch_etf_info(symbol)
+    df_historical = fetch_historical_data(symbol, config.lookback_period)
+    etf_info = fetch_etf_info(symbol) # etf_info contiene già una chiave 'error'
+
+    # Struttura di ritorno di default in caso di errore precoce
+    default_error_return = {
+        'symbol': symbol, 'asset_type': 'ETF', 'info': etf_info,
+        'historical_data': df_historical if isinstance(df_historical, pd.DataFrame) else pd.DataFrame(), # Assicura che sia un DF
+        'current_indicators': {}, 'signals': {}, 'metrics': {}, 'evaluation': 'Errore Dati',
+        'error': etf_info.get('error', "Errore non specificato nell'analisi ETF.")
+    }
 
     if df_historical.empty or 'adj_close' not in df_historical.columns:
-        logging.error(f"Dati storici insufficienti o corrotti per ETF {symbol}.")
-        etf_info['error'] = etf_info.get('error', '') + " Dati storici mancanti."
-        return {
-            'symbol': symbol,
-            'asset_type': 'ETF',
-            'info': etf_info,
-            'historical_data': pd.DataFrame(), # DF vuoto
-            'technical_indicators': {},
-            'metrics': {},
-            'error': etf_info['error']
-        }
+        msg = etf_info.get('error', '') + " Dati storici mancanti o corrotti per ETF."
+        logging.error(msg.strip())
+        default_error_return['error'] = msg.strip()
+        return default_error_return
+    
+    min_rows_needed = max(config.moving_averages.long_term, config.rsi.period, 26, 20, 2)
+    if len(df_historical) < min_rows_needed:
+        msg = etf_info.get('error', '') + f" Non abbastanza dati storici ({len(df_historical)} righe) per indicatori ETF."
+        logging.warning(msg.strip())
+        default_error_return['error'] = msg.strip()
+        default_error_return['historical_data'] = df_historical # Restituisci i dati parziali se li abbiamo
+        return default_error_return
 
-    # Calcola indicatori tecnici base (riutilizza le funzioni per azioni)
+    if 'adj_close' not in df_historical.columns or not pd.api.types.is_numeric_dtype(df_historical['adj_close']):
+        msg = etf_info.get('error', '') + " Colonna 'adj_close' invalida per analisi tecnica ETF."
+        logging.error(msg.strip())
+        default_error_return['error'] = msg.strip()
+        return default_error_return
+
+    # ---- Calcolo Indicatori Tecnici per ETF ----
     df_historical['sma_short'] = calculate_sma(df_historical, config.moving_averages.short_term)
     df_historical['sma_long'] = calculate_sma(df_historical, config.moving_averages.long_term)
     df_historical['rsi'] = calculate_rsi(df_historical, config.rsi.period)
+    
+    macd_params = {'fast': 12, 'slow': 26, 'signal': 9}
+    df_historical.ta.macd(close='adj_close', fast=macd_params['fast'], slow=macd_params['slow'], signal=macd_params['signal'], append=True)
+    macd_line_col = f'MACD_{macd_params["fast"]}_{macd_params["slow"]}_{macd_params["signal"]}'
+    macd_signal_col = f'MACDs_{macd_params["fast"]}_{macd_params["slow"]}_{macd_params["signal"]}'
+    macd_hist_col = f'MACDh_{macd_params["fast"]}_{macd_params["slow"]}_{macd_params["signal"]}'
+        
+    bb_params = {'length': 20, 'std': 2.0}
+    df_historical.ta.bbands(close='adj_close', length=bb_params['length'], std=bb_params['std'], append=True)
+    bb_lower_col = f'BBL_{bb_params["length"]}_{bb_params["std"]}'
+    bb_middle_col = f'BBM_{bb_params["length"]}_{bb_params["std"]}'
+    bb_upper_col = f'BBU_{bb_params["length"]}_{bb_params["std"]}'
+    # --- Fine Calcolo Indicatori ETF ---
 
     latest_data = df_historical.iloc[-1]
     latest_price = latest_data.get('adj_close', np.nan)
 
-    technical_indicators = {
+    current_etf_indicators = {
         'price': latest_price,
         'sma_short': latest_data.get('sma_short', np.nan),
         'sma_long': latest_data.get('sma_long', np.nan),
         'rsi': latest_data.get('rsi', np.nan),
-        'price_vs_sma_short': 'N/A',
-        'price_vs_sma_long': 'N/A',
-        'rsi_signal': 'Neutrale'
+        'macd_line': latest_data.get(macd_line_col, np.nan),
+        'macd_signal': latest_data.get(macd_signal_col, np.nan),
+        'macd_hist': latest_data.get(macd_hist_col, np.nan),
+        'bb_lower': latest_data.get(bb_lower_col, np.nan),
+        'bb_middle': latest_data.get(bb_middle_col, np.nan),
+        'bb_upper': latest_data.get(bb_upper_col, np.nan),
+    }
+    
+    etf_signals = {
+        'price_vs_sma_short': 'N/A', 'price_vs_sma_long': 'N/A', 'rsi_signal': 'Neutrale',
+        'macd_status': 'N/A', 'bb_status': 'N/A'
     }
 
-    if pd.notna(latest_price) and pd.notna(technical_indicators['sma_short']):
-        technical_indicators['price_vs_sma_short'] = "Sopra" if latest_price > technical_indicators['sma_short'] else "Sotto"
-    if pd.notna(latest_price) and pd.notna(technical_indicators['sma_long']):
-        technical_indicators['price_vs_sma_long'] = "Sopra" if latest_price > technical_indicators['sma_long'] else "Sotto"
-    if pd.notna(technical_indicators['rsi']):
-        if technical_indicators['rsi'] < config.rsi.oversold:
-            technical_indicators['rsi_signal'] = "Ipervenduto"
-        elif technical_indicators['rsi'] > config.rsi.overbought:
-            technical_indicators['rsi_signal'] = "Ipercomprato"
+    if pd.notna(latest_price):
+        if pd.notna(current_etf_indicators['sma_short']): etf_signals['price_vs_sma_short'] = "Sopra" if latest_price > current_etf_indicators['sma_short'] else "Sotto"
+        if pd.notna(current_etf_indicators['sma_long']): etf_signals['price_vs_sma_long'] = "Sopra" if latest_price > current_etf_indicators['sma_long'] else "Sotto"
+        if pd.notna(current_etf_indicators['rsi']):
+            if current_etf_indicators['rsi'] < config.rsi.oversold: etf_signals['rsi_signal'] = "Ipervenduto"
+            elif current_etf_indicators['rsi'] > config.rsi.overbought: etf_signals['rsi_signal'] = "Ipercomprato"
+        if pd.notna(current_etf_indicators['macd_line']) and pd.notna(current_etf_indicators['macd_signal']):
+            etf_signals['macd_status'] = "MACD > Segnale (Pot. Rialzista)" if current_etf_indicators['macd_line'] > current_etf_indicators['macd_signal'] else "MACD < Segnale (Pot. Ribassista)"
+        if pd.notna(current_etf_indicators['bb_lower']) and latest_price <= current_etf_indicators['bb_lower']: etf_signals['bb_status'] = "Prezzo <= BB Inf."
+        elif pd.notna(current_etf_indicators['bb_upper']) and latest_price >= current_etf_indicators['bb_upper']: etf_signals['bb_status'] = "Prezzo >= BB Sup."
+        else: etf_signals['bb_status'] = "Prezzo tra Bande"
 
-    # Calcola metriche specifiche ETF
     etf_metrics = {}
-    if pd.notna(latest_price) and pd.notna(etf_info.get('nav_price')) and etf_info['nav_price'] != 0:
-        premium_discount = ((latest_price / etf_info['nav_price']) - 1) * 100
-        etf_metrics['premium_discount_nav'] = premium_discount
+    if pd.notna(latest_price) and pd.notna(etf_info.get('nav_price')) and etf_info.get('nav_price', 0) != 0:
+        etf_metrics['premium_discount_nav'] = ((latest_price / etf_info['nav_price']) - 1) * 100
     else:
         etf_metrics['premium_discount_nav'] = np.nan
 
-    # Per ora, nessuna raccomandazione complessa, solo presentazione dati
+    etf_evaluation_points = []
+    if pd.notna(etf_info.get('expense_ratio')):
+        if etf_info['expense_ratio'] < 0.20: etf_evaluation_points.append("Basso ER")
+        elif etf_info['expense_ratio'] > 0.75: etf_evaluation_points.append("Alto ER")
+    if pd.notna(etf_metrics.get('premium_discount_nav')):
+        if abs(etf_metrics['premium_discount_nav']) < 0.5: etf_evaluation_points.append("Vicino NAV")
+        elif etf_metrics['premium_discount_nav'] > 2.0: etf_evaluation_points.append("Premio Sign. NAV")
+        elif etf_metrics['premium_discount_nav'] < -2.0: etf_evaluation_points.append("Sconto Sign. NAV")
+    if etf_signals['rsi_signal'] != 'Neutrale': etf_evaluation_points.append(f"RSI {etf_signals['rsi_signal']}")
+    if "Rialzista" in etf_signals.get('macd_status',''): etf_evaluation_points.append("MACD Positivo")
+    elif "Ribassista" in etf_signals.get('macd_status',''): etf_evaluation_points.append("MACD Negativo")
+    
+    etf_evaluation = "; ".join(etf_evaluation_points) if etf_evaluation_points else "Valutazione Neutrale/Dati Limitati"
+
     return {
-        'symbol': symbol,
-        'asset_type': 'ETF',
-        'info': etf_info,
-        'historical_data': df_historical, # Per grafici futuri
-        'technical_indicators': technical_indicators,
+        'symbol': symbol, 'asset_type': 'ETF', 'info': etf_info,
+        'historical_data': df_historical,
+        'current_indicators': current_etf_indicators, # Per coerenza con 'Azioni'
+        'signals': etf_signals, 
         'metrics': etf_metrics,
-        'error': etf_info.get('error') # Propaga l'errore da fetch_etf_info se presente
+        'evaluation': etf_evaluation, 
+        'error': etf_info.get('error') # Propaga l'errore da fetch_etf_info
     }
 
 def analyze_all_etfs(config: Config) -> List[Dict]:
@@ -512,68 +581,95 @@ def calculate_rsi(df: pd.DataFrame, period: int = 14, price_col: str = 'adj_clos
     return rsi
 
 def analyze_stock(symbol: str, config: Config) -> Dict:
-    logging.info(f"Analisi di {symbol} in corso...")
+    logging.info(f"Analisi Azione {symbol} in corso...")
     try:
         df_historical = fetch_historical_data(symbol, config.lookback_period)
-        if df_historical.empty or not all(col in df_historical.columns for col in ['date', 'adj_close', 'close']):
-             logging.error(f"Dati storici insufficienti o colonne chiave mancanti per {symbol} dopo fetch. Colonne: {df_historical.columns.tolist() if isinstance(df_historical, pd.DataFrame) else 'Non-DataFrame'}")
-             return {'symbol': symbol, 'error': "Dati storici insufficienti o corrotti."}
         
-        # Controlla se ci sono abbastanza righe per i calcoli
-        min_rows_needed = max(config.moving_averages.long_term, config.rsi.period, 2) # Almeno 2 per prev_data
+        if df_historical.empty or not all(col in df_historical.columns for col in ['date', 'adj_close', 'close']):
+             logging.error(f"Dati storici insufficienti o colonne chiave mancanti per {symbol} dopo fetch.")
+             return {'symbol': symbol, 'asset_type': 'Azione', 'error': "Dati storici insufficienti o corrotti."}
+        
+        min_rows_needed = max(config.moving_averages.long_term, config.rsi.period, 26, 20, 2) # 26 per MACD, 20 per BB, 2 per prev_data
         if len(df_historical) < min_rows_needed:
             logging.warning(f"Non abbastanza righe di dati ({len(df_historical)}) per {symbol} per calcolare tutti gli indicatori (necessarie: {min_rows_needed}).")
-            return {'symbol': symbol, 'error': f"Non abbastanza dati ({len(df_historical)} righe) per l'analisi."}
+            return {'symbol': symbol, 'asset_type': 'Azione', 'error': f"Non abbastanza dati ({len(df_historical)} righe) per l'analisi."}
 
         fundamentals = fetch_fundamentals(symbol)
+
+        # ---- Calcolo Indicatori Tecnici ----
+        if 'adj_close' not in df_historical.columns or not pd.api.types.is_numeric_dtype(df_historical['adj_close']):
+            logging.error(f"Colonna 'adj_close' mancante o non numerica per {symbol}.")
+            return {'symbol': symbol, 'asset_type': 'Azione', 'error': "Colonna 'adj_close' invalida per analisi tecnica."}
+
         df_historical[f'sma_short'] = calculate_sma(df_historical, config.moving_averages.short_term)
         df_historical[f'sma_long'] = calculate_sma(df_historical, config.moving_averages.long_term)
         df_historical[f'rsi'] = calculate_rsi(df_historical, config.rsi.period)
+        
+        # MACD
+        macd_params = {'fast': 12, 'slow': 26, 'signal': 9} # Parametri standard
+        df_historical.ta.macd(close='adj_close', fast=macd_params['fast'], slow=macd_params['slow'], signal=macd_params['signal'], append=True)
+        macd_line_col = f'MACD_{macd_params["fast"]}_{macd_params["slow"]}_{macd_params["signal"]}'
+        macd_signal_col = f'MACDs_{macd_params["fast"]}_{macd_params["slow"]}_{macd_params["signal"]}'
+        macd_hist_col = f'MACDh_{macd_params["fast"]}_{macd_params["slow"]}_{macd_params["signal"]}'
+        
+        # Bande di Bollinger
+        bb_params = {'length': 20, 'std': 2.0} # Parametri standard
+        df_historical.ta.bbands(close='adj_close', length=bb_params['length'], std=bb_params['std'], append=True)
+        bb_lower_col = f'BBL_{bb_params["length"]}_{bb_params["std"]}'
+        bb_middle_col = f'BBM_{bb_params["length"]}_{bb_params["std"]}'
+        bb_upper_col = f'BBU_{bb_params["length"]}_{bb_params["std"]}'
+        # --- Fine Calcolo Indicatori ---
 
         latest_data = df_historical.iloc[-1]
-        prev_data = df_historical.iloc[-2]
+        prev_data = df_historical.iloc[-2] 
         
-        latest_price_adj = latest_data.get('adj_close') # Usa .get() per evitare KeyError se la colonna sparisse per errore
-        latest_price_close = latest_data.get('close')
-
-        if pd.notna(latest_price_adj):
-            latest_price = latest_price_adj
-        elif pd.notna(latest_price_close):
-            latest_price = latest_price_close
-            logging.warning(f"Usato 'close' price per {symbol} dato che 'adj_close' era NaN.")
-        else: # Se entrambi sono NaN, prova dai fondamentali
-            latest_price = fundamentals.get('current_price', np.nan)
-            if pd.notna(latest_price):
-                logging.warning(f"Usato 'current_price' dai fondamentali per {symbol} dato che i prezzi storici erano NaN.")
-            else:
-                 logging.error(f"Prezzo più recente non disponibile per {symbol} né da dati storici né da fondamentali.")
-                 return {'symbol': symbol, 'error': "Prezzo più recente non disponibile."}
+        latest_price = latest_data.get('adj_close', np.nan)
+        if pd.isna(latest_price): latest_price = latest_data.get('close', np.nan)
+        if pd.isna(latest_price): latest_price = fundamentals.get('current_price', np.nan)
+        if pd.isna(latest_price):
+            logging.error(f"Prezzo più recente non disponibile per {symbol}.")
+            return {'symbol': symbol, 'asset_type': 'Azione', 'error': "Prezzo più recente non disponibile."}
 
         signals = {
-            'golden_cross': (pd.notna(latest_data.get('sma_short')) and pd.notna(latest_data.get('sma_long')) and 
-                             pd.notna(prev_data.get('sma_short')) and pd.notna(prev_data.get('sma_long')) and 
-                             latest_data['sma_short'] > latest_data['sma_long'] and 
-                             prev_data['sma_short'] <= prev_data['sma_long']),
-            'death_cross': (pd.notna(latest_data.get('sma_short')) and pd.notna(latest_data.get('sma_long')) and 
-                            pd.notna(prev_data.get('sma_short')) and pd.notna(prev_data.get('sma_long')) and  
-                            latest_data['sma_short'] < latest_data['sma_long'] and 
-                            prev_data['sma_short'] >= prev_data['sma_long']),
-            'rsi_oversold': pd.notna(latest_data.get('rsi')) and latest_data['rsi'] < config.rsi.oversold,
-            'rsi_overbought': pd.notna(latest_data.get('rsi')) and latest_data['rsi'] > config.rsi.overbought,
-            'price_above_sma_short': pd.notna(latest_data.get('sma_short')) and latest_price > latest_data['sma_short'],
-            'price_above_sma_long': pd.notna(latest_data.get('sma_long')) and latest_price > latest_data['sma_long'],
+            'golden_cross': (pd.notna(latest_data.get('sma_short')) and pd.notna(latest_data.get('sma_long')) and pd.notna(prev_data.get('sma_short')) and pd.notna(prev_data.get('sma_long')) and latest_data.get('sma_short', np.nan) > latest_data.get('sma_long', np.nan) and prev_data.get('sma_short', np.nan) <= prev_data.get('sma_long', np.nan)),
+            'death_cross': (pd.notna(latest_data.get('sma_short')) and pd.notna(latest_data.get('sma_long')) and pd.notna(prev_data.get('sma_short')) and pd.notna(prev_data.get('sma_long')) and latest_data.get('sma_short', np.nan) < latest_data.get('sma_long', np.nan) and prev_data.get('sma_short', np.nan) >= prev_data.get('sma_long', np.nan)),
+            'rsi_oversold': pd.notna(latest_data.get('rsi')) and latest_data.get('rsi', 50) < config.rsi.oversold,
+            'rsi_overbought': pd.notna(latest_data.get('rsi')) and latest_data.get('rsi', 50) > config.rsi.overbought,
+            'price_above_sma_short': pd.notna(latest_data.get('sma_short')) and latest_price > latest_data.get('sma_short', float('-inf')),
+            'price_below_sma_short': pd.notna(latest_data.get('sma_short')) and latest_price < latest_data.get('sma_short', float('inf')),
+            'price_above_sma_long': pd.notna(latest_data.get('sma_long')) and latest_price > latest_data.get('sma_long', float('-inf')),
+            'price_below_sma_long': pd.notna(latest_data.get('sma_long')) and latest_price < latest_data.get('sma_long', float('inf')),
+            'macd_bullish_cross': (pd.notna(latest_data.get(macd_line_col)) and pd.notna(latest_data.get(macd_signal_col)) and pd.notna(prev_data.get(macd_line_col)) and pd.notna(prev_data.get(macd_signal_col)) and latest_data.get(macd_line_col, np.nan) > latest_data.get(macd_signal_col, np.nan) and prev_data.get(macd_line_col, np.nan) <= prev_data.get(macd_signal_col, np.nan)),
+            'macd_bearish_cross': (pd.notna(latest_data.get(macd_line_col)) and pd.notna(latest_data.get(macd_signal_col)) and pd.notna(prev_data.get(macd_line_col)) and pd.notna(prev_data.get(macd_signal_col)) and latest_data.get(macd_line_col, np.nan) < latest_data.get(macd_signal_col, np.nan) and prev_data.get(macd_line_col, np.nan) >= prev_data.get(macd_signal_col, np.nan)),
+            'macd_above_zero': pd.notna(latest_data.get(macd_line_col)) and latest_data.get(macd_line_col, np.nan) > 0,
+            'macd_below_zero': pd.notna(latest_data.get(macd_line_col)) and latest_data.get(macd_line_col, np.nan) < 0,
+            'price_touch_bb_lower': pd.notna(latest_data.get(bb_lower_col)) and latest_price <= latest_data.get(bb_lower_col, float('inf')),
+            'price_touch_bb_upper': pd.notna(latest_data.get(bb_upper_col)) and latest_price >= latest_data.get(bb_upper_col, float('-inf')),
         }
-        technical_score = 50.0
-        if signals['golden_cross']: technical_score += 20
-        if signals['death_cross']: technical_score -= 20
-        if signals['rsi_oversold']: technical_score += 15
-        if signals['rsi_overbought']: technical_score -= 15
-        if signals['price_above_sma_short']: technical_score += 5
-        if signals['price_above_sma_long']: technical_score += 10
-        technical_score = max(0, min(100, technical_score))
 
+        current_indicators_values = {
+            'price': latest_price,
+            'sma_short': latest_data.get('sma_short', np.nan),
+            'sma_long': latest_data.get('sma_long', np.nan),
+            'rsi': latest_data.get('rsi', np.nan),
+            'macd_line': latest_data.get(macd_line_col, np.nan),
+            'macd_signal': latest_data.get(macd_signal_col, np.nan),
+            'macd_hist': latest_data.get(macd_hist_col, np.nan),
+            'bb_lower': latest_data.get(bb_lower_col, np.nan),
+            'bb_middle': latest_data.get(bb_middle_col, np.nan),
+            'bb_upper': latest_data.get(bb_upper_col, np.nan),
+        }
+
+        technical_score = float(config.base_technical_score)
+        for signal_name, is_active in signals.items():
+            if is_active and signal_name in config.technical_signal_weights:
+                technical_score += config.technical_signal_weights[signal_name]
+        technical_score = max(0.0, min(100.0, technical_score))
+
+        # Calcolo Punteggio Fondamentale (come prima, assicurati di usare .get() per `fundamentals`)
         fundamental_score = 0.0; achieved_score = 0.0; max_possible_score_for_available_data = 0.0
-        criteria_weights = {'market_cap': 15, 'pe': 25, 'dividend_yield': 20, 'roe': 25, 'debt_to_equity': 15}
+        criteria_weights = {'market_cap': 15, 'pe': 25, 'dividend_yield': 20, 'roe': 25, 'debt_to_equity': 15} # Puoi metterli in Config se vuoi
+        
         if pd.notna(fundamentals.get('market_cap')):
             max_possible_score_for_available_data += criteria_weights['market_cap']
             if fundamentals['market_cap'] > config.screening_criteria.min_market_cap: achieved_score += criteria_weights['market_cap']
@@ -590,31 +686,41 @@ def analyze_stock(symbol: str, config: Config) -> Dict:
             max_possible_score_for_available_data += criteria_weights['roe']
             if roe_val > config.screening_criteria.min_roe: achieved_score += criteria_weights['roe']
         de_val = fundamentals.get('debt_to_equity')
-        if pd.notna(de_val): # Assumendo che un D/E più basso sia migliore
+        if pd.notna(de_val):
             max_possible_score_for_available_data += criteria_weights['debt_to_equity']
             if de_val < config.screening_criteria.debt_to_equity_max: achieved_score += criteria_weights['debt_to_equity']
         
         if max_possible_score_for_available_data > 0: fundamental_score = (achieved_score / max_possible_score_for_available_data) * 100.0
-        else: fundamental_score = 50.0 # Neutro se nessun dato fondamentale per lo scoring
-        fundamental_score = max(0, min(100, fundamental_score))
+        else: fundamental_score = 50.0
+        fundamental_score = max(0.0, min(100.0, fundamental_score))
 
-        overall_score = (technical_score * 0.5) + (fundamental_score * 0.5)
+        overall_score = (technical_score * 0.5) + (fundamental_score * 0.5) # Puoi rendere questi pesi configurabili
+        
         if overall_score >= 75: recommendation = 'FORTE ACQUISTO'
         elif overall_score >= 60: recommendation = 'ACQUISTO'
         elif overall_score >= 40: recommendation = 'MANTIENI'
         elif overall_score >= 25: recommendation = 'VENDI'
         else: recommendation = 'FORTE VENDITA'
         
-        return {'symbol': symbol, 'latest_price': latest_price, 'fundamentals': fundamentals,
-                'technical_score': technical_score, 'fundamental_score': fundamental_score,
-                'overall_score': overall_score, 'signals': signals, 'recommendation': recommendation,
-                'df_historical': df_historical}
-    except KeyError as ke:
-        logging.error(f"KeyError nell'analisi di {symbol}: Manca la colonna '{ke}'. Dati storici potrebbero essere malformati. Colonne DF: {df_historical.columns.tolist() if 'df_historical' in locals() and isinstance(df_historical, pd.DataFrame) else 'DF non disponibile'}", exc_info=True)
-        return {'symbol': symbol, 'error': f"KeyError: {ke} - colonna mancante."}
+        return {
+            'symbol': symbol,
+            'asset_type': 'Azione', # Aggiunto per chiarezza nel dizionario result
+            'latest_price': latest_price,
+            'fundamentals': fundamentals,
+            'technical_score': technical_score,
+            'fundamental_score': fundamental_score,
+            'overall_score': overall_score,
+            'signals': signals,
+            'current_indicators': current_indicators_values,
+            'recommendation': recommendation,
+            'df_historical': df_historical
+        }
+    except pd.errors.EmptyDataError:
+        logging.error(f"EmptyDataError per {symbol} durante analisi tecnica, probabilmente yfinance non ha dati sufficienti per indicatori con pandas_ta.")
+        return {'symbol': symbol, 'asset_type': 'Azione', 'error': "Dati insufficienti per indicatori pandas_ta."}
     except Exception as e:
         logging.error(f"Errore critico generico nell'analisi di {symbol}: {e}", exc_info=True)
-        return {'symbol': symbol, 'error': str(e)}
+        return {'symbol': symbol, 'asset_type': 'Azione', 'error': str(e)}
 
 def analyze_all_stocks(config: Config) -> List[Dict]:
     results = []
@@ -627,7 +733,8 @@ def analyze_all_stocks(config: Config) -> List[Dict]:
 def create_stock_chart(stock_analysis: Dict, config: Config) -> Optional[Path]:
     try:
         symbol = stock_analysis['symbol']
-        df = stock_analysis['df_historical']
+        df = stock_analysis['df_historical'] # Ora contiene colonne MACD e BB
+        
         if df.empty or not all(col in df.columns for col in ['date', 'adj_close']):
             logging.warning(f"Dati insufficienti o colonne 'date'/'adj_close' mancanti per grafico di {symbol}.")
             return None
@@ -635,40 +742,85 @@ def create_stock_chart(stock_analysis: Dict, config: Config) -> Optional[Path]:
         charts_path = Path(CHARTS_DIRECTORY)
         charts_path.mkdir(parents=True, exist_ok=True)
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
-        fig.suptitle(f"Analisi Tecnica di {symbol} - {stock_analysis['recommendation']}", fontsize=13)
+        # Determina il numero di subplot necessari (Prezzo+BB, RSI, MACD)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True, 
+                                 gridspec_kw={'height_ratios': [3, 1, 2]}) # Aggiustato per 3 subplot
+        fig.suptitle(f"Analisi Tecnica di {symbol} - {stock_analysis.get('recommendation', 'Dati Asset')}", fontsize=14)
         
-        ax1.plot(df['date'], df['adj_close'], label='Prezzo Adj.', color='navy', alpha=0.9, linewidth=1.2)
-        if 'sma_short' in df.columns: ax1.plot(df['date'], df['sma_short'], label=f'SMA {config.moving_averages.short_term}', color='darkorange', linestyle='--', linewidth=0.9)
-        if 'sma_long' in df.columns: ax1.plot(df['date'], df['sma_long'], label=f'SMA {config.moving_averages.long_term}', color='crimson', linestyle='--', linewidth=0.9)
-        ax1.set_title(f'Prezzo e Medie Mobili', fontsize=9); ax1.set_ylabel('Prezzo ($)', fontsize=8)
-        ax1.legend(fontsize=7); ax1.grid(True, linestyle=':', alpha=0.5)
-        ax1.tick_params(axis='y', labelsize=7)
+        ax_price = axes[0]
+        ax_rsi = axes[1]
+        ax_macd = axes[2]
+
+        # ---- Grafico Prezzi, SMA e Bande di Bollinger ----
+        ax_price.plot(df['date'], df['adj_close'], label='Prezzo Adj.', color='navy', alpha=0.9, linewidth=1.2)
+        if 'sma_short' in df.columns: ax_price.plot(df['date'], df['sma_short'], label=f'SMA {config.moving_averages.short_term}', color='darkorange', linestyle='--', linewidth=0.9)
+        if 'sma_long' in df.columns: ax_price.plot(df['date'], df['sma_long'], label=f'SMA {config.moving_averages.long_term}', color='crimson', linestyle='--', linewidth=0.9)
         
+        # Bande di Bollinger (i nomi esatti delle colonne dipendono dai parametri usati in pandas_ta)
+        bb_lower_col = next((col for col in df.columns if 'BBL' in col), None) # Trova colonna Lower Band
+        bb_middle_col = next((col for col in df.columns if 'BBM' in col), None) # Middle Band
+        bb_upper_col = next((col for col in df.columns if 'BBU' in col), None) # Upper Band
+
+        if bb_lower_col and bb_upper_col and bb_middle_col:
+            ax_price.plot(df['date'], df[bb_middle_col], label='BB Middle', color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
+            ax_price.plot(df['date'], df[bb_upper_col], label='BB Upper', color='lightgray', linestyle=':', linewidth=0.8, alpha=0.7)
+            ax_price.plot(df['date'], df[bb_lower_col], label='BB Lower', color='lightgray', linestyle=':', linewidth=0.8, alpha=0.7)
+            ax_price.fill_between(df['date'], df[bb_lower_col], df[bb_upper_col], color='gainsboro', alpha=0.2, interpolate=True)
+        
+        ax_price.set_title(f'Prezzo, SMA e Bande di Bollinger', fontsize=9)
+        ax_price.set_ylabel('Prezzo ($)', fontsize=8)
+        ax_price.legend(fontsize=7, loc='upper left')
+        ax_price.grid(True, linestyle=':', alpha=0.5)
+        ax_price.tick_params(axis='y', labelsize=7)
+        
+        # ---- Grafico RSI (come prima) ----
         if 'rsi' in df.columns:
-            ax2.plot(df['date'], df['rsi'], label=f'RSI ({config.rsi.period})', color='purple', linewidth=1.2)
-            ax2.axhline(config.rsi.overbought, color='red', linestyle='--', alpha=0.4, linewidth=0.8)
-            ax2.axhline(config.rsi.oversold, color='green', linestyle='--', alpha=0.4, linewidth=0.8)
-            ax2.fill_between(df['date'], config.rsi.overbought, df['rsi'], where=(df['rsi'] >= config.rsi.overbought), color='salmon', alpha=0.3, interpolate=True)
-            ax2.fill_between(df['date'], config.rsi.oversold, df['rsi'], where=(df['rsi'] <= config.rsi.oversold), color='lightgreen', alpha=0.3, interpolate=True)
-        ax2.set_title(f'RSI', fontsize=9); ax2.set_ylabel('RSI', fontsize=8); ax2.set_ylim([0, 100])
-        ax2.legend(fontsize=7); ax2.grid(True, linestyle=':', alpha=0.5)
-        ax2.tick_params(axis='both', labelsize=7)
+            # ... (codice grafico RSI identico a prima, usa ax_rsi) ...
+            ax_rsi.plot(df['date'], df['rsi'], label=f'RSI ({config.rsi.period})', color='purple', linewidth=1.2)
+            ax_rsi.axhline(config.rsi.overbought, color='red', linestyle='--', alpha=0.4, linewidth=0.8)
+            ax_rsi.axhline(config.rsi.oversold, color='green', linestyle='--', alpha=0.4, linewidth=0.8)
+            ax_rsi.fill_between(df['date'], config.rsi.overbought, df['rsi'], where=(df['rsi'] >= config.rsi.overbought), color='salmon', alpha=0.3, interpolate=True)
+            ax_rsi.fill_between(df['date'], config.rsi.oversold, df['rsi'], where=(df['rsi'] <= config.rsi.oversold), color='lightgreen', alpha=0.3, interpolate=True)
+        ax_rsi.set_title(f'RSI', fontsize=9)
+        ax_rsi.set_ylabel('RSI', fontsize=8)
+        ax_rsi.set_ylim([0, 100])
+        ax_rsi.legend(fontsize=7, loc='upper left')
+        ax_rsi.grid(True, linestyle=':', alpha=0.5)
+        ax_rsi.tick_params(axis='y', labelsize=7)
+
+        # ---- Grafico MACD ----
+        macd_line_col = next((col for col in df.columns if 'MACD_' in col and 'MACDh' not in col and 'MACDs' not in col), None)
+        macd_signal_col = next((col for col in df.columns if 'MACDs_' in col), None)
+        macd_hist_col = next((col for col in df.columns if 'MACDh_' in col), None)
+
+        if macd_line_col and macd_signal_col and macd_hist_col:
+            ax_macd.plot(df['date'], df[macd_line_col], label='MACD Line', color='blue', linewidth=1)
+            ax_macd.plot(df['date'], df[macd_signal_col], label='Signal Line', color='red', linestyle='--', linewidth=1)
+            # Colora l'istogramma MACD
+            colors = ['green' if val >= 0 else 'red' for val in df[macd_hist_col]]
+            ax_macd.bar(df['date'], df[macd_hist_col], label='MACD Histogram', color=colors, width=0.7, alpha=0.5) # width dipende dalla frequenza dei dati
+            ax_macd.axhline(0, color='gray', linestyle='--', linewidth=0.5)
+        ax_macd.set_title(f'MACD (12,26,9)', fontsize=9)
+        ax_macd.set_ylabel('MACD', fontsize=8)
+        ax_macd.legend(fontsize=7, loc='upper left')
+        ax_macd.grid(True, linestyle=':', alpha=0.5)
+        ax_macd.tick_params(axis='both', labelsize=7)
         
-        plt.xticks(rotation=25, ha='right')
-        ax2.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%y-%m-%d'))
-        ax2.xaxis.set_major_locator(plt.MaxNLocator(7))
+        # Formattazione asse X comune
+        plt.xticks(rotation=30, ha='right')
+        ax_macd.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%y-%m-%d'))
+        ax_macd.xaxis.set_major_locator(plt.MaxNLocator(10)) # Meno ticks per leggibilità
         
-        plt.tight_layout(rect=[0, 0.02, 1, 0.96])
+        plt.tight_layout(rect=[0, 0.02, 1, 0.95]) # Aggiusta per suptitle e labels
         
-        chart_filename = f"{symbol}_analysis.png"
+        chart_filename = f"{symbol}_analysis_adv.png" # Nome file diverso
         full_chart_path = charts_path / chart_filename
-        plt.savefig(full_chart_path, dpi=100) # dpi ridotto per file più piccoli
-        logging.info(f"Grafico per {symbol} salvato: {full_chart_path}")
+        plt.savefig(full_chart_path, dpi=100)
+        logging.info(f"Grafico avanzato per {symbol} salvato: {full_chart_path}")
         plt.close(fig)
         return full_chart_path
     except Exception as e:
-        logging.error(f"Errore creazione grafico per {stock_analysis['symbol']}: {e}", exc_info=True)
+        logging.error(f"Errore creazione grafico avanzato per {stock_analysis['symbol']}: {e}", exc_info=True)
         return None
 
 # ---- FUNZIONI GUI ----
@@ -852,58 +1004,97 @@ def run_master_analysis(app_config: Config, text_area: scrolledtext.ScrolledText
     finally:
         schedule_gui_update(run_button.config, state=tk.NORMAL, text="Avvia Analisi")
 
+# Assicurati che pandas (pd), logging, create_stock_chart, e la variabile globale generated_charts_paths
+# siano definite e accessibili prima di questa funzione.
+# Anche la dataclass Config deve essere definita.
+
 def generate_report_for_gui(analysis_results: List[Dict], asset_type: str, chart_listbox: Listbox, config: Config):
-    global generated_charts_paths # Necessaria per aggiungere i percorsi dei grafici generati
+    global generated_charts_paths 
     
     logging.info(f"\n" + "="*50 + f"\nREPORT DI INVESTIMENTO ({asset_type})\n" + "="*50)
     
     for result in analysis_results:
         symbol = result.get('symbol', 'N/A_SYM')
-        error_message = result.get('error')
+        error_message = result.get('error') # Può essere None se non ci sono errori
         
-        is_placeholder_etf_message = (isinstance(error_message, str) and 
-                                      error_message == 'Analisi ETF non implementata, solo dati storici base.') # Potremmo rimuovere questo se l'analisi ETF è più completa
-        
-        if error_message is not None and not is_placeholder_etf_message:
+        # Stampa un errore solo se error_message è una stringa non vuota (cioè un errore effettivo)
+        if error_message is not None and isinstance(error_message, str):
             logging.error(f"\n{symbol}: ERRORE - {error_message}")
-            continue 
+            continue # Passa al prossimo risultato se c'è stato un errore significativo
         
+        # Se siamo qui, o error_message è None (nessun errore grave), o non è una stringa (caso anomalo)
         logging.info(f"\n--- {symbol} ({asset_type}) ---")
 
         if asset_type == "Azioni":
-            if error_message is None: 
-                logging.info(f"Raccomandazione: {result.get('recommendation', 'N/A')} (Punteggio: {result.get('overall_score', 0.0):.1f})")
-                logging.info(f"  Prezzo: ${result.get('latest_price', 0.0):.2f}")
-                f = result.get('fundamentals', {})
-                logging.info("  Dati Fondamentali:")
-                logging.info(f"    Cap: ${f.get('market_cap', 0)/1e9:.2f}B" if pd.notna(f.get('market_cap')) else "    Cap: N/A")
-                logging.info(f"    P/E: {f.get('pe'):.2f}" if pd.notna(f.get('pe')) else "    P/E: N/A")
-                logging.info(f"    DivY: {f.get('dividend_yield'):.2f}%" if pd.notna(f.get('dividend_yield')) else "    DivY: N/A")
-                logging.info(f"    ROE: {f.get('roe'):.2f}%" if pd.notna(f.get('roe')) else "    ROE: N/A")
-                logging.info(f"    D/E: {f.get('debt_to_equity'):.2f}" if pd.notna(f.get('debt_to_equity')) else "    D/E: N/A")
-                logging.info(f"    Settore: {f.get('sector', 'N/A')}")
-                logging.info(f"  Punteggio Tecnico: {result.get('technical_score', 0.0):.1f}/100")
-                logging.info(f"  Punteggio Fondamentale: {result.get('fundamental_score', 0.0):.1f}/100")
-                
-                signals = result.get('signals', {})
-                active_signals = [name for name, active in signals.items() if active]
-                if active_signals: logging.info(f"  Segnali: {', '.join(sig.replace('_', ' ').title() for sig in active_signals)}")
-                
-                recommendation = result.get('recommendation', '')
-                if ('ACQUISTO' in recommendation or 'FORTE ACQUISTO' in recommendation) and 'df_historical' in result:
-                    chart_file_path = create_stock_chart(result, config)
-                    if chart_file_path and chart_file_path.exists():
-                         generated_charts_paths.append(chart_file_path)
-                         if chart_listbox.winfo_exists():
-                            chart_listbox.after(0, lambda path_name=chart_file_path.name: chart_listbox.insert(END, path_name))
+            # Se error_message era None, l'analisi dell'azione è andata a buon fine.
+            logging.info(f"Raccomandazione: {result.get('recommendation', 'N/A')} (Punteggio: {result.get('overall_score', 0.0):.1f})")
+            logging.info(f"  Prezzo Attuale: ${result.get('latest_price', float('nan')):.2f}")
+            
+            f = result.get('fundamentals', {})
+            logging.info("  Dati Fondamentali:")
+            logging.info(f"    Cap: ${f.get('market_cap', 0)/1e9:.2f}B" if pd.notna(f.get('market_cap')) else "    Cap: N/A")
+            logging.info(f"    P/E: {f.get('pe', float('nan')):.2f}" if pd.notna(f.get('pe')) else "    P/E: N/A")
+            logging.info(f"    DivY: {f.get('dividend_yield', float('nan')):.2f}%" if pd.notna(f.get('dividend_yield')) else "    DivY: N/A")
+            logging.info(f"    ROE: {f.get('roe', float('nan')):.2f}%" if pd.notna(f.get('roe')) else "    ROE: N/A")
+            logging.info(f"    D/E: {f.get('debt_to_equity', float('nan')):.2f}" if pd.notna(f.get('debt_to_equity')) else "    D/E: N/A")
+            logging.info(f"    Settore: {f.get('sector', 'N/A')}")
+            
+            logging.info(f"  Punteggio Tecnico: {result.get('technical_score', 0.0):.1f}/100")
+            logging.info(f"  Punteggio Fondamentale: {result.get('fundamental_score', 0.0):.1f}/100")
+            
+            current_inds = result.get('current_indicators', {})
+            logging.info("  Valori Indicatori Tecnici:")
+            logging.info(f"    SMA {config.moving_averages.short_term}gg: {current_inds.get('sma_short', float('nan')):.2f}")
+            logging.info(f"    SMA {config.moving_averages.long_term}gg: {current_inds.get('sma_long', float('nan')):.2f}")
+            logging.info(f"    RSI ({config.rsi.period}): {current_inds.get('rsi', float('nan')):.1f}")
+            logging.info(f"    MACD Line: {current_inds.get('macd_line', float('nan')):.2f}")
+            logging.info(f"    MACD Signal: {current_inds.get('macd_signal', float('nan')):.2f}")
+            logging.info(f"    MACD Hist: {current_inds.get('macd_hist', float('nan')):.2f}")
+            logging.info(f"    BB Lower: {current_inds.get('bb_lower', float('nan')):.2f}")
+            logging.info(f"    BB Middle: {current_inds.get('bb_middle', float('nan')):.2f}")
+            logging.info(f"    BB Upper: {current_inds.get('bb_upper', float('nan')):.2f}")
+
+            signals = result.get('signals', {})
+            active_signals_desc = []
+            # Costruisci la lista delle descrizioni dei segnali attivi
+            if signals.get('golden_cross'): active_signals_desc.append("Golden Cross")
+            if signals.get('death_cross'): active_signals_desc.append("Death Cross")
+            if signals.get('rsi_oversold'): active_signals_desc.append("RSI Ipervenduto")
+            if signals.get('rsi_overbought'): active_signals_desc.append("RSI Ipercomprato")
+            if signals.get('macd_bullish_cross'): active_signals_desc.append("MACD Incrocio Rialzista")
+            if signals.get('macd_bearish_cross'): active_signals_desc.append("MACD Incrocio Ribassista")
+            if signals.get('macd_above_zero'): active_signals_desc.append("MACD Sopra Zero")
+            if signals.get('macd_below_zero'): active_signals_desc.append("MACD Sotto Zero")
+            if signals.get('price_touch_bb_lower'): active_signals_desc.append("Prezzo Tocca BB Inferiore")
+            if signals.get('price_touch_bb_upper'): active_signals_desc.append("Prezzo Tocca BB Superiore")
+            if signals.get('price_above_sma_short'): active_signals_desc.append(f"Prezzo > SMA{config.moving_averages.short_term}")
+            if signals.get('price_below_sma_short'): active_signals_desc.append(f"Prezzo < SMA{config.moving_averages.short_term}")
+            if signals.get('price_above_sma_long'): active_signals_desc.append(f"Prezzo > SMA{config.moving_averages.long_term}")
+            if signals.get('price_below_sma_long'): active_signals_desc.append(f"Prezzo < SMA{config.moving_averages.long_term}")
+            
+            if active_signals_desc: 
+                logging.info(f"  Segnali Tecnici Attivi: {', '.join(active_signals_desc)}")
+            else:
+                logging.info("  Nessun segnale tecnico specifico rilevato.")
+            
+            recommendation = result.get('recommendation', '')
+            if ('ACQUISTO' in recommendation or 'FORTE ACQUISTO' in recommendation) and 'df_historical' in result:
+                # Prepara il dizionario per create_stock_chart in modo che abbia le chiavi attese
+                chart_input_data = {
+                    'symbol': symbol,
+                    'df_historical': result['df_historical'],
+                    'recommendation': recommendation # Passa la raccomandazione effettiva
+                }
+                chart_file_path = create_stock_chart(chart_input_data, config)
+                if chart_file_path and chart_file_path.exists():
+                     generated_charts_paths.append(chart_file_path)
+                     if chart_listbox.winfo_exists():
+                        chart_listbox.after(0, lambda path_name=chart_file_path.name: chart_listbox.insert(END, path_name))
 
         elif asset_type == "ETF":
-            if is_placeholder_etf_message: # Rimosso, ora l'analisi ETF dovrebbe essere più completa
-                 # logging.info(f"  Nota: {error_message}") # Non più necessario se analyze_all_etfs funziona
-                 pass
-
             info = result.get('info', {})
-            tech = result.get('technical_indicators', {})
+            tech_values = result.get('current_indicators', {}) 
+            etf_signals = result.get('signals', {})
             metrics = result.get('metrics', {})
 
             logging.info(f"  Nome: {info.get('name', 'N/A')}")
@@ -917,21 +1108,29 @@ def generate_report_for_gui(analysis_results: List[Dict], asset_type: str, chart
             logging.info(f"  Rendimento (Yield): {yield_val:.2f}%" if pd.notna(yield_val) else "  Rendimento (Yield): N/A")
             beta_val = info.get('beta')
             logging.info(f"  Beta: {beta_val:.2f}" if pd.notna(beta_val) else "  Beta: N/A")
-            price_val = tech.get('price')
+            
+            price_val = tech_values.get('price')
             nav_val = info.get('nav_price')
             logging.info(f"  Prezzo Attuale: ${price_val:.2f}" if pd.notna(price_val) else "  Prezzo Attuale: N/A")
             logging.info(f"  NAV Stimato: ${nav_val:.2f}" if pd.notna(nav_val) else "  NAV Stimato: N/A")
             prem_disc_val = metrics.get('premium_discount_nav')
             logging.info(f"  Premio/Sconto vs NAV: {prem_disc_val:.2f}%" if pd.notna(prem_disc_val) else "  Premio/Sconto vs NAV: N/A")
 
-            logging.info("  Indicatori Tecnici (base):")
-            sma_short_val = tech.get('sma_short')
-            sma_long_val = tech.get('sma_long')
-            rsi_val = tech.get('rsi')
-            logging.info(f"    SMA Corto ({config.moving_averages.short_term}gg): {sma_short_val:.2f} ({tech.get('price_vs_sma_short', 'N/A')})" if pd.notna(sma_short_val) else f"    SMA Corto ({config.moving_averages.short_term}gg): N/A")
-            logging.info(f"    SMA Lungo ({config.moving_averages.long_term}gg): {sma_long_val:.2f} ({tech.get('price_vs_sma_long', 'N/A')})" if pd.notna(sma_long_val) else f"    SMA Lungo ({config.moving_averages.long_term}gg): N/A")
-            logging.info(f"    RSI ({config.rsi.period}): {rsi_val:.1f} ({tech.get('rsi_signal', 'N/A')})" if pd.notna(rsi_val) else f"    RSI ({config.rsi.period}): N/A")
+            logging.info("  Valori Indicatori Tecnici (ETF):")
+            logging.info(f"    SMA {config.moving_averages.short_term}gg: {tech_values.get('sma_short', float('nan')):.2f} ({etf_signals.get('price_vs_sma_short','N/A')})")
+            logging.info(f"    SMA {config.moving_averages.long_term}gg: {tech_values.get('sma_long', float('nan')):.2f} ({etf_signals.get('price_vs_sma_long','N/A')})")
+            logging.info(f"    RSI ({config.rsi.period}): {tech_values.get('rsi', float('nan')):.1f} ({etf_signals.get('rsi_signal','N/A')})")
+            logging.info(f"    MACD Line: {tech_values.get('macd_line', float('nan')):.2f}")
+            logging.info(f"    MACD Signal: {tech_values.get('macd_signal', float('nan')):.2f}")
+            logging.info(f"    MACD Hist: {tech_values.get('macd_hist', float('nan')):.2f}")
+            logging.info(f"    MACD Status: {etf_signals.get('macd_status','N/A')}")
+            logging.info(f"    BB Lower: {tech_values.get('bb_lower', float('nan')):.2f}")
+            logging.info(f"    BB Middle: {tech_values.get('bb_middle', float('nan')):.2f}")
+            logging.info(f"    BB Upper: {tech_values.get('bb_upper', float('nan')):.2f}")
+            logging.info(f"    BB Status: {etf_signals.get('bb_status','N/A')}")
             
+            logging.info(f"  Valutazione ETF: {result.get('evaluation', 'N/A')}")
+
             if 'historical_data' in result and not result['historical_data'].empty:
                 chart_data_for_etf = {'symbol': symbol, 'df_historical': result['historical_data'], 'recommendation': "Dati ETF"}
                 chart_file_path = create_stock_chart(chart_data_for_etf, config)
@@ -943,7 +1142,6 @@ def generate_report_for_gui(analysis_results: List[Dict], asset_type: str, chart
         elif asset_type == "Obbligazioni":
             info = result.get('info', {})
             metrics = result.get('metrics', {})
-
             logging.info(f"  Nome/Descrizione: {info.get('name', 'N/A')}")
             logging.info(f"  Valuta: {info.get('currency', 'N/A')}")
             coupon_rate = info.get('coupon_rate')
@@ -959,7 +1157,6 @@ def generate_report_for_gui(analysis_results: List[Dict], asset_type: str, chart
             logging.info(f"  Rating Creditizio: {info.get('bond_rating', 'N/A (non da YF)')}")
             
             if 'historical_data' in result and not result['historical_data'].empty and 'adj_close' in result['historical_data'].columns:
-                # Potrebbe essere necessario adattare create_stock_chart se l'asse Y o i dati sono molto diversi
                 chart_data_for_bond = {'symbol': symbol, 'df_historical': result['historical_data'], 'recommendation': "Andamento Prezzo Obbligazione"}
                 chart_file_path = create_stock_chart(chart_data_for_bond, config)
                 if chart_file_path and chart_file_path.exists():
@@ -975,10 +1172,30 @@ def generate_report_for_gui(analysis_results: List[Dict], asset_type: str, chart
         logging.info("\n\n" + "="*50 + "\nMIGLIORI OPPORTUNITÀ (Azioni):\n" + "="*50)
         if top_picks:
             for i, pick in enumerate(top_picks):
-                logging.info(f"{i+1}. {pick['symbol']} ({pick.get('recommendation','N/A')}) - Punteggio: {pick.get('overall_score',0.0):.1f}")
+                logging.info(f"{i+1}. {pick.get('symbol','N/A')} ({pick.get('recommendation','N/A')}) - Punteggio: {pick.get('overall_score',0.0):.1f}")
         else:
             logging.info("Nessuna opportunità di acquisto/forte acquisto identificata per le Azioni.")
-    # Potresti aggiungere logiche simili per ETF o Obbligazioni se definisci criteri di "top picks"
+    # Aggiungi qui una logica simile per ETF o Obbligazioni se definisci criteri di "top picks"
+    # Esempio per ETF (molto basilare, basato su expense ratio basso):
+    elif asset_type == "ETF":
+        # Filtra ETF senza errori e con expense ratio valido
+        valid_etfs_for_ranking = [
+            r for r in analysis_results 
+            if r.get('error') is None and 
+            isinstance(r.get('info'), dict) and 
+            pd.notna(r['info'].get('expense_ratio'))
+        ]
+        if valid_etfs_for_ranking:
+            # Ordina per expense ratio (ascendente) e prendi i primi 3
+            top_etfs = sorted(valid_etfs_for_ranking, key=lambda x: x['info']['expense_ratio'])[:3]
+            logging.info("\n\n" + "="*50 + "\nETF CON BASSO EXPENSE RATIO (Esempio):\n" + "="*50)
+            if top_etfs:
+                for i, etf_pick in enumerate(top_etfs):
+                    logging.info(f"{i+1}. {etf_pick.get('symbol','N/A')} - ER: {etf_pick['info'].get('expense_ratio', float('nan')):.2f}% - Nome: {etf_pick.get('info',{}).get('name','N/A')}")
+            else:
+                logging.info("Nessun ETF con dati su Expense Ratio trovato per il ranking.")
+        else:
+            logging.info("\nNessun ETF con dati sufficienti per un ranking sull'Expense Ratio.")
             
     logging.info("\n" + "-"*50 + "\nNOTA: Report a scopo informativo.\n" + "="*50)
 
