@@ -7846,7 +7846,7 @@ def main():
     nb_title.pack(fill=tk.X)
     nb_frame = tk.Frame(tab_numerical_binary, bg="#F8F8FF", pady=20)
     nb_frame.pack(fill=tk.BOTH, expand=True)
-    nb_info = tk.Label(nb_frame, text="Avvia il modulo per l'analisi delle sequenze binarie\n basate sui pattern verticali nel gioco del Lotto.", font=("Arial", 12), bg="#F8F8FF", pady=10, justify=tk.CENTER)
+    nb_info = tk.Label(nb_frame, text="Avvia il modulo per l'analisi delle sequenze binarie\n basate sui pattern nel gioco del Lotto.", font=("Arial", 12), bg="#F8F8FF", pady=10, justify=tk.CENTER)
     nb_info.pack()
     # Controlla se il modulo è stato caricato correttamente
     nb_button_state = tk.NORMAL if NUMERICAL_BINARY_MODULE_LOADED else tk.DISABLED
@@ -7867,7 +7867,7 @@ def main():
     nb_descrizione.insert(tk.END, "Questo modulo ('numerical_binary_module.py') permette di:\n\n")
     nb_descrizione.insert(tk.END, " • Caricare archivi storici del Lotto da GitHub.\n")
     nb_descrizione.insert(tk.END, " • Convertire i numeri estratti in rappresentazione binaria.\n")
-    nb_descrizione.insert(tk.END, " • Analizzare pattern verticali di una data lunghezza (H).\n")
+    nb_descrizione.insert(tk.END, " • Analizzare pattern di una data lunghezza (H).\n")
     nb_descrizione.insert(tk.END, " • Identificare i pattern più sbilanciati (0 vs 1) su base storica.\n")
     nb_descrizione.insert(tk.END, " • Generare una previsione binaria (e decimale) per le 5 posizioni.\n")
     nb_descrizione.insert(tk.END, " • Eseguire backtesting storico per validare l'efficacia del metodo.")
