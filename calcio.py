@@ -1,172 +1,167 @@
 import pandas as pd
 import numpy as np
-import requests
+# import requests # Non più strettamente necessario qui se non per altre funzionalità
 import os
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
-import matplotlib.pyplot as plt
-# import seaborn as sns # Commentato se non usato attivamente
-from datetime import datetime, timedelta # Aggiunto timedelta
+# import matplotlib.pyplot as plt # Commentato se non usato attivamente
+from datetime import datetime, timedelta 
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
-import traceback # Per stampare il traceback completo degli errori
+import traceback 
 
 # ==============================================================================
-# FUNZIONI DI BASE (Le tue funzioni)
+# FUNZIONI DI BASE (Alcune potrebbero non essere più usate o vanno adattate)
 # ==============================================================================
 
-def scarica_dati(url, percorso_salvataggio):
-    """
-    Scarica i dati da un URL e li salva localmente.
-    Restituisce True in caso di successo, (False, errore_str) in caso di fallimento.
-    """
-    try:
-        response = requests.get(url, timeout=10) # Aggiunto timeout
-        response.raise_for_status()
-        with open(percorso_salvataggio, 'wb') as file:
-            file.write(response.content)
-        return True
-    except requests.exceptions.RequestException as e: # Più specifico per errori di rete/http
-        return False, f"Errore HTTP/Rete: {str(e)}"
-    except Exception as e:
-        return False, str(e)
+# def scarica_dati(url, percorso_salvataggio): # NON PIÙ USATA DIRETTAMENTE QUI
+#     """
+#     Scarica i dati da un URL e li salva localmente.
+#     Restituisce True in caso di successo, (False, errore_str) in caso di fallimento.
+#     """
+#     try:
+#         response = requests.get(url, timeout=10) 
+#         response.raise_for_status()
+#         with open(percorso_salvataggio, 'wb') as file:
+#             file.write(response.content)
+#         return True
+#     except requests.exceptions.RequestException as e: 
+#         return False, f"Errore HTTP/Rete: {str(e)}"
+#     except Exception as e:
+#         return False, str(e)
 
-def carica_dati(percorso_file):
+def carica_dati_csv_globale(percorso_file): # Rinominata per chiarezza
     """
-    Carica i dati delle partite da un file CSV.
+    Carica i dati delle partite da un singolo file CSV globale.
     Restituisce df in caso di successo, (None, errore_str) in caso di fallimento.
     """
     try:
-        # Prova con encoding comuni, latin1 è spesso usato per questi file
-        df = pd.read_csv(percorso_file, encoding='latin1', on_bad_lines='warn') # 'warn' invece di 'skip' per vedere se ci sono problemi
+        # Il CSV dallo scraper dovrebbe essere UTF-8
+        df = pd.read_csv(percorso_file, encoding='utf-8', on_bad_lines='warn')
         if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+            # Lo script di scraping salva già le date in formato dd/mm/yy
+            # Pandas dovrebbe interpretarle correttamente, ma forziamo il formato se necessario
+            try:
+                df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%y', errors='coerce')
+            except ValueError: # Se il formato è già datetime o un altro formato pandas-compatibile
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+
+        # Conversione esplicita di FTHG e FTAG in numerico, gestendo i NaN che sono stringhe vuote o 'None'
+        for col_score in ['FTHG', 'FTAG']:
+            if col_score in df.columns:
+                df[col_score] = pd.to_numeric(df[col_score], errors='coerce')
         return df
     except FileNotFoundError:
-        return None, "File non trovato."
+        return None, f"File non trovato: {percorso_file}"
     except pd.errors.EmptyDataError:
-        return None, "File vuoto."
+        return None, f"File vuoto: {percorso_file}"
     except Exception as e:
-        return None, str(e)
+        return None, f"Errore caricamento CSV {percorso_file}: {str(e)}"
 
-def pulisci_dati(df):
+def pulisci_dati_csv_globale(df): # Rinominata e adattata
     """
-    Pulisce i dati e seleziona solo le colonne rilevanti.
+    Pulisce i dati dal CSV globale e seleziona solo le colonne rilevanti.
+    Il CSV da Livescore ha già una struttura definita.
     """
     if df is None or df.empty: 
-        return pd.DataFrame() # Restituisci DataFrame vuoto se input è None o vuoto
-
-    colonne_necessarie = ['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR']
-    colonne_presenti_df = df.columns.tolist()
-
-    colonne_da_mantenere = [col for col in colonne_necessarie if col in colonne_presenti_df]
-    
-    colonne_quote = ['B365H', 'B365D', 'B365A', 'BWH', 'BWD', 'BWA', 'IWH', 'IWD', 'IWA'] # Espandi se necessario
-    colonne_da_mantenere.extend([col for col in colonne_quote if col in colonne_presenti_df])
-    
-    altre_statistiche = ['HS', 'AS', 'HST', 'AST', 'HC', 'AC', 'HF', 'AF', 'HY', 'AY', 'HR', 'AR']
-    colonne_da_mantenere.extend([col for col in altre_statistiche if col in colonne_presenti_df])
-    
-    colonne_da_mantenere = sorted(list(set(colonne_da_mantenere))) # Rimuovi duplicati e ordina
-    
-    if not any(col in colonne_da_mantenere for col in colonne_necessarie if col != 'Date'): # Se mancano colonne chiave oltre la data
-         # Potresti loggare un avviso più specifico qui
-         pass
-
-    if not colonne_da_mantenere: # Se nessuna colonna è stata selezionata
         return pd.DataFrame()
+
+    # Colonne attese dal CSV di Livescore
+    colonne_attese = ['Div', 'Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR']
+    colonne_da_mantenere = [col for col in colonne_attese if col in df.columns]
+
+    if not all(col in df.columns for col in ['Date', 'HomeTeam', 'AwayTeam']): # Colonne minime
+         print("Attenzione: Colonne fondamentali (Date, HomeTeam, AwayTeam) mancanti nel CSV caricato.")
+         # Potrebbe restituire df vuoto o gestire l'errore diversamente
+         return pd.DataFrame() # O sollevare un'eccezione
 
     df_pulito = df[colonne_da_mantenere].copy()
     
-    # Colonne indispensabili per il dropna per la logica successiva (es. calcolo ResultValue)
-    subset_dropna_fondamentali = [col for col in ['Date', 'HomeTeam', 'AwayTeam', 'FTR'] if col in df_pulito.columns]
-    if len(subset_dropna_fondamentali) == 4: # Solo se tutte e 4 sono presenti
-        df_pulito.dropna(subset=subset_dropna_fondamentali, inplace=True)
-    else: # Se mancano colonne fondamentali, il df potrebbe non essere utilizzabile per feature complesse
-        # print("Attenzione: colonne fondamentali per FTR mancanti, la pulizia potrebbe essere incompleta.")
-        pass
-        
+    # Assicura che 'Date' sia datetime
+    if 'Date' in df_pulito.columns and not pd.api.types.is_datetime64_any_dtype(df_pulito['Date']):
+        try:
+            df_pulito['Date'] = pd.to_datetime(df_pulito['Date'], format='%d/%m/%y', errors='coerce')
+        except ValueError:
+             df_pulito['Date'] = pd.to_datetime(df_pulito['Date'], errors='coerce')
+
+
+    # Per FTR, i valori mancanti potrebbero essere stringhe vuote o 'None' dallo scraping se non gestiti prima
+    # Sostituisci stringhe vuote o la stringa 'None' con np.nan reale per FTR
+    if 'FTR' in df_pulito.columns:
+        df_pulito['FTR'] = df_pulito['FTR'].replace(['', 'None'], np.nan)
+
+
+    # Dropna per le righe dove FTR è NaN ma FTHG/FTAG non lo sono (partite passate senza risultato registrato)
+    # e per righe con informazioni base mancanti.
+    # Per l'addestramento, FTR è cruciale. Per le previsioni, FTR sarà NaN.
+    # Questa pulizia è più mirata all'addestramento.
+    subset_dropna_addestramento = ['Date', 'HomeTeam', 'AwayTeam', 'FTR', 'FTHG', 'FTAG']
+    colonne_presenti_per_dropna = [col for col in subset_dropna_addestramento if col in df_pulito.columns]
+    
+    # Rimuovi righe solo se TUTTE le colonne chiave per un risultato giocato sono mancanti
+    # o se FTR è mancante per una partita che DOVREBBE avere un risultato.
+    # Questa logica potrebbe essere rivista. Per ora, un dropna più semplice su info base:
+    df_pulito.dropna(subset=['Date', 'HomeTeam', 'AwayTeam'], inplace=True) # Info base devono esserci
+
     return df_pulito
 
 
 def prepara_caratteristiche(df, n_partite_precedenti=5):
-    """
-    Crea caratteristiche avanzate per il modello predittivo.
-    """
+    # Questa funzione dovrebbe rimanere in gran parte invariata
+    # Assicura che df in input abbia 'Date', 'HomeTeam', 'AwayTeam', 'FTR' (può essere NaN per future)
     if df.empty: 
         return pd.DataFrame()
     df_prep = df.copy()
 
-    # 'ResultValue' può essere calcolato solo se 'FTR' è presente e non NaN
     if 'FTR' in df_prep.columns and df_prep['FTR'].notna().any():
-        # Applica la mappatura solo dove FTR non è NaN per evitare errori con tipi misti se ci sono NaN
         idx_not_na_ftr = df_prep['FTR'].notna()
-        df_prep.loc[idx_not_na_ftr, 'ResultValue'] = df_prep.loc[idx_not_na_ftr, 'FTR'].map({'H': 1, 'D': 0, 'A': -1})
+        df_prep.loc[idx_not_na_ftr, 'ResultValue'] = df_prep.loc[idx_not_na_ftr, 'FTR'].map({'H': 1, 'D': 0, 'A': -1}).astype(float) # Assicura float
     else:
-        # Se FTR manca o è tutto NaN, non possiamo creare ResultValue per la forma
-        # Assegniamo NaN, così le partite future non influenzeranno la forma calcolata
         df_prep['ResultValue'] = np.nan 
 
-    squadre_home = df_prep['HomeTeam'].dropna().unique() if 'HomeTeam' in df_prep.columns else []
-    squadre_away = df_prep['AwayTeam'].dropna().unique() if 'AwayTeam' in df_prep.columns else []
-    squadre = list(set(list(squadre_home)) | set(list(squadre_away)))
-
-    if not squadre: 
-        return df_prep # Restituisce il df così com'è se non ci sono squadre (improbabile)
-
-    stats_squadre_per_feature_creation = {squadra: {'FormaRecente': []} for squadra in squadre}
-
-    if 'Date' not in df_prep.columns: 
-        return df_prep # Impossibile ordinare e calcolare forma correttamente
+    # Assicurati che Date sia ordinabile
+    if 'Date' not in df_prep.columns or not pd.api.types.is_datetime64_any_dtype(df_prep['Date']):
+        # print("Colonna 'Date' non è di tipo datetime o mancante in prepara_caratteristiche.")
+        return pd.DataFrame() # Non possiamo procedere senza date ordinate
     df_prep.sort_values('Date', inplace=True)
 
-    features_list = []
-    for i, partita in df_prep.iterrows():
-        home_team = partita['HomeTeam']
-        away_team = partita['AwayTeam']
-        
-        feature_row = {}
-        
-        # Copia tutte le colonne esistenti dal df_prep originale a feature_row
-        for col in df_prep.columns:
-            feature_row[col] = partita[col]
+    squadre = pd.concat([df_prep['HomeTeam'], df_prep['AwayTeam']]).dropna().unique()
+    if not squadre.any(): return df_prep
 
-        if pd.notna(home_team) and home_team in stats_squadre_per_feature_creation:
-            current_forma_casa = stats_squadre_per_feature_creation[home_team]['FormaRecente']
-            feature_row['FormaCasa'] = np.mean(current_forma_casa) if current_forma_casa else 0
-        else:
-            feature_row['FormaCasa'] = 0 # Default se squadra non valida
-
-        if pd.notna(away_team) and away_team in stats_squadre_per_feature_creation:
-            current_forma_trasferta = stats_squadre_per_feature_creation[away_team]['FormaRecente']
-            feature_row['FormaTrasferta'] = np.mean(current_forma_trasferta) if current_forma_trasferta else 0
-        else:
-            feature_row['FormaTrasferta'] = 0 # Default
-
-        features_list.append(feature_row)
-        
-        risultato_val_partita = partita.get('ResultValue', np.nan) # Usa .get per sicurezza
-        if pd.notna(risultato_val_partita): # Aggiorna la forma solo se il risultato è noto
-            if pd.notna(home_team) and home_team in stats_squadre_per_feature_creation:
-                if risultato_val_partita == 1: stats_squadre_per_feature_creation[home_team]['FormaRecente'].append(3)
-                elif risultato_val_partita == 0: stats_squadre_per_feature_creation[home_team]['FormaRecente'].append(1)
-                else: stats_squadre_per_feature_creation[home_team]['FormaRecente'].append(0) # Include sconfitta (-1)
-                stats_squadre_per_feature_creation[home_team]['FormaRecente'] = \
-                    stats_squadre_per_feature_creation[home_team]['FormaRecente'][-n_partite_precedenti:]
-
-            if pd.notna(away_team) and away_team in stats_squadre_per_feature_creation:
-                if risultato_val_partita == -1: stats_squadre_per_feature_creation[away_team]['FormaRecente'].append(3) # Vittoria trasferta
-                elif risultato_val_partita == 0: stats_squadre_per_feature_creation[away_team]['FormaRecente'].append(1) # Pareggio
-                else: stats_squadre_per_feature_creation[away_team]['FormaRecente'].append(0) # Sconfitta trasferta (Vittoria casa = 1)
-                stats_squadre_per_feature_creation[away_team]['FormaRecente'] = \
-                    stats_squadre_per_feature_creation[away_team]['FormaRecente'][-n_partite_precedenti:]
+    stats_squadre = {squadra: {'FormaRecente': []} for squadra in squadre}
     
-    if not features_list: 
-        return pd.DataFrame(columns=df_prep.columns.tolist() + ['FormaCasa', 'FormaTrasferta']) # Schema colonne
-    return pd.DataFrame(features_list)
+    df_prep['FormaCasa'] = 0.0 # Inizializza come float
+    df_prep['FormaTrasferta'] = 0.0 # Inizializza come float
+
+    for i, row in df_prep.iterrows():
+        ht = row['HomeTeam']
+        at = row['AwayTeam']
+
+        if pd.notna(ht) and ht in stats_squadre:
+            forma_casa_val = stats_squadre[ht]['FormaRecente']
+            df_prep.loc[i, 'FormaCasa'] = np.mean(forma_casa_val) if forma_casa_val else 0.0
+        
+        if pd.notna(at) and at in stats_squadre:
+            forma_trasf_val = stats_squadre[at]['FormaRecente']
+            df_prep.loc[i, 'FormaTrasferta'] = np.mean(forma_trasf_val) if forma_trasf_val else 0.0
+
+        if pd.notna(row.get('ResultValue')): # Usa .get per sicurezza, anche se l'abbiamo creato
+            rv = row['ResultValue']
+            if pd.notna(ht) and ht in stats_squadre:
+                if rv == 1: stats_squadre[ht]['FormaRecente'].append(3)
+                elif rv == 0: stats_squadre[ht]['FormaRecente'].append(1)
+                else: stats_squadre[ht]['FormaRecente'].append(0)
+                stats_squadre[ht]['FormaRecente'] = stats_squadre[ht]['FormaRecente'][-n_partite_precedenti:]
+            
+            if pd.notna(at) and at in stats_squadre:
+                if rv == -1: stats_squadre[at]['FormaRecente'].append(3)
+                elif rv == 0: stats_squadre[at]['FormaRecente'].append(1)
+                else: stats_squadre[at]['FormaRecente'].append(0)
+                stats_squadre[at]['FormaRecente'] = stats_squadre[at]['FormaRecente'][-n_partite_precedenti:]
+    return df_prep
 
 
 def separa_dati_recenti(df, n_partite=10): # Questa funzione potrebbe non essere più necessaria con il nuovo approccio
@@ -379,15 +374,13 @@ def crea_modello_predittivo(df_train_input, caratteristiche_input, log_func=prin
 # LOGICA GUI E FUNZIONE PRINCIPALE run_analysis_logic
 # ==============================================================================
 
-def run_analysis_logic(output_widget, soglia_conf_var, orizzonte_gg_var, urls_to_process_dict):
-    """Contiene la logica principale del tuo programma, modificata per output su GUI."""
+def run_analysis_logic(output_widget, soglia_conf_var, orizzonte_gg_var): # Rimosso urls_to_process_dict
     def log_message(message):
         if output_widget:
             output_widget.config(state=tk.NORMAL)
-            output_widget.insert(tk.END, str(message) + "\n") # Converti a stringa per sicurezza
+            output_widget.insert(tk.END, str(message) + "\n")
             output_widget.see(tk.END) 
             output_widget.config(state=tk.DISABLED)
-            # output_widget.update_idletasks() # Rimosso per performance, il mainloop di Tkinter dovrebbe gestire l'aggiornamento
 
     try:
         log_message("Avvio analisi...")
@@ -395,96 +388,82 @@ def run_analysis_logic(output_widget, soglia_conf_var, orizzonte_gg_var, urls_to
         orizzonte_giorni_gui = int(orizzonte_gg_var.get())
         log_message(f"Soglia confidenza: {soglia_confidenza_gui}, Orizzonte previsione: {orizzonte_giorni_gui} giorni")
 
-        os.makedirs('dati_calcio', exist_ok=True)
-        
-        dataframes_raw_dict = {} 
-        log_message("\n--- FASE 1: Download e Caricamento Dati ---")
-        
-        for nome_file_key, url_value in urls_to_process_dict.items():
-            percorso = f"dati_calcio/{nome_file_key}.csv" # Usa la chiave del dizionario per il nome file
-            log_message(f"Processando: {nome_file_key}")
-            
-            download_status = scarica_dati(url_value, percorso)
-            if isinstance(download_status, tuple) and not download_status[0]: 
-                 log_message(f"  -> ERRORE download {nome_file_key}: {download_status[1]}")
-                 continue
-            elif not download_status: 
-                 log_message(f"  -> ERRORE download sconosciuto {nome_file_key}.")
-                 continue
-            else:
-                 log_message(f"  -> File {nome_file_key} scaricato/aggiornato.")
+        PERCORSO_CSV_GLOBALE = "dati_livescore_tutti_campionati.csv" 
 
-            caricamento_status = carica_dati(percorso)
-            if isinstance(caricamento_status, tuple) and caricamento_status[0] is None:
-                log_message(f"  -> ERRORE caricamento {nome_file_key}: {caricamento_status[1]}")
-                continue
-            df_singolo_caricato = caricamento_status
-
-            if df_singolo_caricato is not None and not df_singolo_caricato.empty:
-                if 'Date' in df_singolo_caricato.columns and df_singolo_caricato['Date'].notna().any():
-                    # Assicurati che le date valide siano presenti
-                    df_valido_con_date = df_singolo_caricato.dropna(subset=['Date'])
-                    if not df_valido_con_date.empty:
-                        log_message(f"  -> {len(df_valido_con_date)} righe. Date da {df_valido_con_date['Date'].min().strftime('%Y-%m-%d')} a {df_valido_con_date['Date'].max().strftime('%Y-%m-%d')}")
-                        dataframes_raw_dict[nome_file_key] = df_valido_con_date
-                    else:
-                        log_message(f"  -> File {nome_file_key}: vuoto dopo rimozione date non valide.")
-                else:
-                    log_message(f"  -> File {nome_file_key}: Colonna 'Date' mancante o tutta NaN.")
-            else:
-                log_message(f"  -> File {nome_file_key}: Non caricato o vuoto dopo `carica_dati`.")
+        log_message(f"\n--- FASE 1: Caricamento Dati da {PERCORSO_CSV_GLOBALE} ---")
         
-        lista_df_da_combinare = []
-        for nome_origine_file, df_contenuto in dataframes_raw_dict.items():
-            df_processato = pulisci_dati(df_contenuto)
-            if df_processato is not None and not df_processato.empty:
-                df_processato['FonteFile'] = nome_origine_file 
-                df_processato['Campionato'] = nome_origine_file.split('_')[0]
-                lista_df_da_combinare.append(df_processato)
-
-        if not lista_df_da_combinare:
-            log_message("\nNessun dato valido da nessun file dopo la pulizia. Uscita.")
-            messagebox.showerror("Errore", "Nessun dato valido caricato dopo la pulizia.")
+        if not os.path.exists(PERCORSO_CSV_GLOBALE):
+            log_message(f"ERRORE: File dati '{PERCORSO_CSV_GLOBALE}' non trovato.")
+            log_message("Eseguire prima lo script di scraping per generare questo file.")
+            messagebox.showerror("Errore File", f"File dati '{PERCORSO_CSV_GLOBALE}' non trovato. Eseguire prima lo script di scraping.")
             return
 
-        df_combinato = pd.concat(lista_df_da_combinare, ignore_index=True)
-        log_message(f"\n--- FASE 2: Dataset Combinato ---")
-        log_message(f"Dataset combinato creato. Shape: {df_combinato.shape}")
+        caricamento_status = carica_dati_csv_globale(PERCORSO_CSV_GLOBALE) 
+        
+        if isinstance(caricamento_status, tuple) and caricamento_status[0] is None:
+            log_message(f"  -> ERRORE caricamento {PERCORSO_CSV_GLOBALE}: {caricamento_status[1]}")
+            messagebox.showerror("Errore Caricamento", f"Errore caricando {PERCORSO_CSV_GLOBALE}: {caricamento_status[1]}")
+            return
+        
+        df_input = caricamento_status
 
+        if df_input is None or df_input.empty:
+            log_message(f"  -> File {PERCORSO_CSV_GLOBALE} non caricato o vuoto.")
+            messagebox.showerror("Errore Dati", f"File {PERCORSO_CSV_GLOBALE} non caricato o vuoto.")
+            return
+        else:
+            log_message(f"  -> File {PERCORSO_CSV_GLOBALE} caricato. Righe iniziali: {len(df_input)}")
+
+        log_message("\n--- FASE 2: Pulizia Dati ---")
+        df_combinato = pulisci_dati_csv_globale(df_input.copy()) # Lavora su una copia
         if df_combinato.empty:
-            log_message("Errore: df_combinato è vuoto.")
-            messagebox.showerror("Errore", "df_combinato vuoto.")
-            return
+           log_message("Errore: DataFrame vuoto dopo la pulizia iniziale.")
+           messagebox.showerror("Errore Dati", "DataFrame vuoto dopo la pulizia iniziale.")
+           return
+        log_message(f"Dati dopo pulizia base. Righe: {len(df_combinato)}")
+
+        # Mappatura 'Div' a 'Campionato'
+        mappa_div_campionato = {
+            "I1": "SerieA", "I2": "SerieB", "SP1": "LaLiga", "F1": "Ligue1",
+            "D1": "Bundesliga", "E0": "PremierLeague", "ITC1": "CoppaItalia"
+            # Aggiungi altre mappature se i tuoi 'Div' sono diversi/più numerosi
+        }
+        if 'Div' in df_combinato.columns:
+            df_combinato['Campionato'] = df_combinato['Div'].map(mappa_div_campionato).fillna(df_combinato['Div'])
+        else:
+            log_message("ATTENZIONE: Colonna 'Div' non trovata per creare 'Campionato'. Usare un placeholder o gestire.")
+            df_combinato['Campionato'] = "Sconosciuto" 
+
+        log_message(f"\n--- Dataset Combinato Pronto ---")
+        log_message(f"Dataset combinato (da file unico) pronto. Shape: {df_combinato.shape}")
         
         if 'Date' in df_combinato.columns:
+            df_combinato.dropna(subset=['Date'], inplace=True) # Assicura che non ci siano Date NaN
             df_combinato.sort_values(by='Date', inplace=True)
             if not df_combinato.empty:
-                log_message(f"Data massima: {df_combinato['Date'].max().strftime('%Y-%m-%d')}")
-                log_message(f"Data minima: {df_combinato['Date'].min().strftime('%Y-%m-%d')}")
-            else:
-                log_message("df_combinato vuoto dopo ordinamento (improbabile se non era vuoto prima).")
+                log_message(f"Data minima: {df_combinato['Date'].min().strftime('%Y-%m-%d')}, Data massima: {df_combinato['Date'].max().strftime('%Y-%m-%d')}")
+            else: log_message("df_combinato vuoto dopo dropna su Date o ordinamento.")
         else:
-            log_message("Errore: Colonna 'Date' mancante in df_combinato.")
-            messagebox.showerror("Errore", "Colonna 'Date' mancante.")
-            return
+            log_message("ERRORE: Colonna 'Date' mancante in df_combinato."); return
         
-        log_message("\n--- FASE 3: Preparazione Caratteristiche ---")
-        df_features_complete = prepara_caratteristiche(df_combinato) # Passa df_combinato
+        if df_combinato.empty: log_message("ERRORE: df_combinato vuoto prima di prepara_caratteristiche."); return
+
+        log_message("\n--- FASE 3: Preparazione Caratteristiche Avanzate ---")
+        df_features_complete = prepara_caratteristiche(df_combinato.copy()) 
         
         if df_features_complete.empty:
-             log_message("Errore: df_features_complete è vuoto dopo prepara_caratteristiche.")
-             messagebox.showerror("Errore", "Errore nella preparazione delle caratteristiche.")
-             return
+             log_message("Errore: df_features_complete è vuoto dopo prepara_caratteristiche."); return
+        log_message(f"Dati dopo preparazione caratteristiche. Righe: {len(df_features_complete)}")
 
-        oggi = pd.to_datetime(datetime.now().date()) # Usa .date() per mezzanotte
-       
-        # Partite per addestramento: quelle passate (< oggi) e con un risultato FTR valido
+
+        oggi = pd.to_datetime(datetime.now().date())
         df_addestramento_candidati = df_features_complete[
             (df_features_complete['Date'] < oggi) & 
-            (df_features_complete['FTR'].notna())
+            (df_features_complete['FTR'].notna()) & 
+            (df_features_complete['FTHG'].notna()) & 
+            (df_features_complete['FTAG'].notna())
         ].copy()
 
-        # Partite da prevedere: da oggi in avanti per N giorni
         data_limite_previsione = oggi + pd.to_timedelta(orizzonte_giorni_gui, unit='d')
         df_da_prevedere_candidati = df_features_complete[
             (df_features_complete['Date'] >= oggi) &
@@ -492,70 +471,72 @@ def run_analysis_logic(output_widget, soglia_conf_var, orizzonte_gg_var, urls_to
         ].copy()
         
         log_message(f"\n--- Divisione Dati ---")
-        log_message(f"Dati addestramento (partite < {oggi.strftime('%Y-%m-%d')} con FTR): {df_addestramento_candidati.shape[0]} partite")
-        log_message(f"Dati da prevedere (partite da {oggi.strftime('%Y-%m-%d')} a {data_limite_previsione.strftime('%Y-%m-%d')}): {df_da_prevedere_candidati.shape[0]} partite")
+        log_message(f"Dati addestramento candidati (partite < {oggi.strftime('%Y-%m-%d')} con FTR e punteggi): {len(df_addestramento_candidati)} partite")
+        log_message(f"Dati da prevedere candidati (partite da {oggi.strftime('%Y-%m-%d')} a {data_limite_previsione.strftime('%Y-%m-%d')}): {len(df_da_prevedere_candidati)} partite")
 
         if df_addestramento_candidati.empty:
-            log_message("Nessun dato di addestramento disponibile.")
-            messagebox.showwarning("Attenzione", "Nessun dato storico per addestrare il modello.")
-            return
+            log_message("Nessun dato di addestramento disponibile dopo i filtri."); return
         
-        # Definizione delle caratteristiche
-        caratteristiche_da_escludere = ['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR', 'ResultValue', 'Campionato', 'FonteFile']
-        caratteristiche_modello = [col for col in df_addestramento_candidati.columns if col not in caratteristiche_da_escludere]
-        caratteristiche_modello = [col for col in caratteristiche_modello if df_addestramento_candidati[col].notna().any()] # Rimuovi colonne tutte NaN
+        # === MODIFICA PER CARATTERISTICHE MODELLO ===
+        caratteristiche_modello = ['FormaCasa', 'FormaTrasferta'] # Feature numeriche di base
 
-        # Drop NaN solo sul set di addestramento e solo per le feature selezionate
-        # È cruciale che ResultValue non sia NaN qui. FTR.notna() dovrebbe averlo già gestito.
-        df_addestramento_final = df_addestramento_candidati.dropna(subset=caratteristiche_modello + ['ResultValue']).copy()
+        # Aggiungiamo 'Div' come feature categorica. 
+        # La funzione crea_modello_predittivo applicherà pd.get_dummies()
+        # Puoi scegliere 'Div' (codice es. I1, SP1) o 'Campionato' (nome es. SerieA, LaLiga)
+        # 'Div' è solitamente più conciso.
+        colonna_campionato_da_usare = 'Div' 
+
+        if colonna_campionato_da_usare in df_addestramento_candidati.columns:
+            # Verifica se la colonna ha più di un valore unico prima di aggiungerla,
+            # altrimenti pd.get_dummies con drop_first=True potrebbe rimuoverla completamente se c'è un solo valore.
+            if df_addestramento_candidati[colonna_campionato_da_usare].nunique() > 1:
+                caratteristiche_modello.append(colonna_campionato_da_usare)
+                log_message(f"Aggiunta '{colonna_campionato_da_usare}' alle caratteristiche del modello.")
+            else:
+                log_message(f"ATTENZIONE: Colonna '{colonna_campionato_da_usare}' ha un solo valore unico, non utile per la dummificazione con drop_first=True.")
+        else:
+            log_message(f"ATTENZIONE: Colonna '{colonna_campionato_da_usare}' non trovata nei dati di addestramento, non verrà usata come feature.")
+        # === FINE MODIFICA PER CARATTERISTICHE MODELLO ===
+
+        df_addestramento_final = df_addestramento_candidati.dropna(subset=['ResultValue'] + [col for col in caratteristiche_modello if col in df_addestramento_candidati.columns]).copy() # Assicura che le feature esistano
+        log_message(f"Dati addestramento finali (dopo dropna su ResultValue e features): {len(df_addestramento_final)} partite")
 
 
-        if df_addestramento_final.empty:
-            log_message("Dati di addestramento vuoti dopo dropna sulle caratteristiche selezionate e ResultValue.")
-            messagebox.showerror("Errore", "Dati di addestramento insufficienti dopo pulizia NaN.")
-            return
-
-        if not caratteristiche_modello:
-            log_message("Nessuna caratteristica valida per il modello.")
-            messagebox.showerror("Errore", "Nessuna caratteristica per il modello.")
-            return
+        if df_addestramento_final.empty or not caratteristiche_modello: # Verifica se caratteristiche_modello non è vuota
+            log_message("Dati di addestramento insufficienti o nessuna caratteristica valida selezionata."); return
             
-        log_message(f"Numero di caratteristiche per il modello: {len(caratteristiche_modello)}")
+        # Rimuovi ulteriormente le caratteristiche che potrebbero non esistere più dopo il dropna precedente
+        caratteristiche_modello_effettive = [col for col in caratteristiche_modello if col in df_addestramento_final.columns]
+        if not caratteristiche_modello_effettive:
+            log_message("Nessuna caratteristica valida rimasta dopo la pulizia finale dei dati di addestramento."); return
+
+        log_message(f"Caratteristiche per il modello: {caratteristiche_modello_effettive}")
         log_message("\n--- FASE 4: Addestramento Modello ---")
-        model, X_columns_trained_final = crea_modello_predittivo(df_addestramento_final, caratteristiche_modello, log_func=log_message)
+        model, X_columns_trained_final = crea_modello_predittivo(df_addestramento_final, caratteristiche_modello_effettive, log_func=log_message)
         
         if model is None:
-            log_message("Addestramento modello fallito.")
-            messagebox.showerror("Errore", "Addestramento modello fallito.")
-            return
+            log_message("Addestramento modello fallito."); return
         log_message("Modello addestrato.")
 
         log_message("\n--- FASE 5: Suggerimento Partite ---")
         if not df_da_prevedere_candidati.empty:
             log_message(f"Suggerimenti con soglia >= {soglia_confidenza_gui}:")
-            
-            # Per le partite da prevedere, le quote potrebbero mancare. `prepara_dati_per_previsione`
-            # dovrebbe riempire con 0 le colonne mancanti rispetto a X_columns_trained_final
-            partite_consigliate_df = suggerisci_partite(df_da_prevedere_candidati, model, X_columns_trained_final, soglia_confidenza=soglia_confidenza_gui)
+            partite_consigliate_df = suggerisci_partite(df_da_prevedere_candidati.copy(), model, X_columns_trained_final, soglia_confidenza=soglia_confidenza_gui)
             
             if not partite_consigliate_df.empty:
-                partite_consigliate_display_df = partite_consigliate_df.copy()
-                if 'Date' in partite_consigliate_display_df.columns:
-                     partite_consigliate_display_df['Date'] = pd.to_datetime(partite_consigliate_display_df['Date']).dt.strftime('%Y-%m-%d')
+                max_len_home = partite_consigliate_df['HomeTeam'].astype(str).map(len).max()
+                max_len_away = partite_consigliate_df['AwayTeam'].astype(str).map(len).max()
+                max_len_prev = partite_consigliate_df['PrevisioneLabel'].astype(str).map(len).max()
                 
-                log_message("Partite Consigliate:")
-                # Formattazione per allineamento colonne
-                # Calcola la larghezza massima per HomeTeam e AwayTeam per un migliore allineamento
-                max_len_home = partite_consigliate_display_df['HomeTeam'].astype(str).map(len).max() + 2
-                max_len_away = partite_consigliate_display_df['AwayTeam'].astype(str).map(len).max() + 2
-                max_len_prev = partite_consigliate_display_df['PrevisioneLabel'].astype(str).map(len).max() + 2
+                max_len_home = max(10, int(max_len_home) if pd.notna(max_len_home) else 10) + 2
+                max_len_away = max(10, int(max_len_away) if pd.notna(max_len_away) else 10) + 2
+                max_len_prev = max(15, int(max_len_prev) if pd.notna(max_len_prev) else 15) + 2
 
                 header = f"{'Date':<11} {'HomeTeam':<{max_len_home}} {'AwayTeam':<{max_len_away}} {'Previsione':<{max_len_prev}} MaxProb"
-                log_message(header)
+                log_message("Partite Consigliate:\n" + header)
                 log_message("-" * len(header))
-
-                for _, row_sugg in partite_consigliate_display_df[['Date', 'HomeTeam', 'AwayTeam', 'PrevisioneLabel', 'MaxProb']].head(30).iterrows():
-                    log_message(f"{row_sugg['Date']:<11} {str(row_sugg['HomeTeam']):<{max_len_home}} {str(row_sugg['AwayTeam']):<{max_len_away}} {str(row_sugg['PrevisioneLabel']):<{max_len_prev}} {row_sugg['MaxProb']:.2f}")
+                for _, row_sugg in partite_consigliate_df[['Date', 'HomeTeam', 'AwayTeam', 'PrevisioneLabel', 'MaxProb']].head(30).iterrows():
+                    log_message(f"{pd.to_datetime(row_sugg['Date']).strftime('%d/%m/%y'):<11} {str(row_sugg['HomeTeam']):<{max_len_home}} {str(row_sugg['AwayTeam']):<{max_len_away}} {str(row_sugg['PrevisioneLabel']):<{max_len_prev}} {row_sugg['MaxProb']:.2f}")
             else:
                 log_message(f"Nessuna partita consigliata con soglia >= {soglia_confidenza_gui}.")
         else:
@@ -579,8 +560,9 @@ def start_analysis_thread_wrapper():
     output_text.delete('1.0', tk.END)
     output_text.config(state=tk.DISABLED)
     
+    # urls_config non è più passata a run_analysis_logic
     analysis_thread = threading.Thread(target=run_analysis_logic, 
-                                       args=(output_text, soglia_var, orizzonte_var, urls_config))
+                                       args=(output_text, soglia_var, orizzonte_var))
     analysis_thread.daemon = True 
     analysis_thread.start()
     check_thread_status(analysis_thread)
