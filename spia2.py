@@ -1514,11 +1514,25 @@ risultato_text.pack(fill=tk.BOTH,expand=True); risultato_scroll_y.config(command
 
 def aggiorna_lista_file_gui(target_listbox):
     global file_ruote
-    if not target_listbox: return 
+    if not target_listbox: return
     target_listbox.config(state=tk.NORMAL); target_listbox.delete(0, tk.END)
-    ruote_ordinate = sorted(file_ruote.keys())
-    if ruote_ordinate: _=[target_listbox.insert(tk.END,r) for r in ruote_ordinate]
-    else: target_listbox.insert(tk.END, "Nessun file ruota valido"); target_listbox.config(state=tk.DISABLED)
+
+    # Modifica per ordinamento personalizzato: NAZIONALE per ultima
+    lista_ruote_originale = list(file_ruote.keys())
+    ruota_nazionale_str = "NAZIONALE"
+    
+    ruote_ordinate = sorted([r for r in lista_ruote_originale if r != ruota_nazionale_str])
+    
+    if ruota_nazionale_str in lista_ruote_originale:
+        ruote_ordinate.append(ruota_nazionale_str)
+    # Fine modifica
+
+    if ruote_ordinate:
+        for r in ruote_ordinate:
+            target_listbox.insert(tk.END, r)
+    else:
+        target_listbox.insert(tk.END, "Nessun file ruota valido")
+        target_listbox.config(state=tk.DISABLED)
 
 def mappa_file_ruote():
     global file_ruote, cartella_entry
