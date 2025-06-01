@@ -5,10 +5,12 @@ import random
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import itertools
 from tensorflow.keras import regularizers
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+from collections import Counter
 import threading
 import traceback
 import requests  # Richiede: pip install requests
@@ -78,8 +80,6 @@ def _update_log_widget(log_widget, message):
                  log_widget.config(state=tk.DISABLED)
         except: pass
 
-# --- Caricamento Dati (carica_dati_superenalotto INVARIATA) ---
-# --- Caricamento Dati (CORRETTO) ---
 def carica_dati_superenalotto(data_source, start_date=None, end_date=None, log_callback=None):
     """
     Carica i dati del SuperEnalotto da un URL (RAW GitHub) o da un file locale.
@@ -462,6 +462,79 @@ def build_model_superenalotto(input_shape, hidden_layers=[512, 256, 128], loss_f
 
     return model
 
+def calcola_numeri_spia_superenalotto(numeri_array_storico, date_array_storico, numeri_spia_target,
+                                     colpi_successivi, top_n_singoli, top_n_ambi, top_n_terni,
+                                     log_callback=None, stop_event=None):
+    """
+    Analizza lo storico del SuperEnalotto per trovare singoli, ambi e terni 
+    che seguono i numeri spia.
+    Args:
+        numeri_array_storico (np.array): Array (N_draws, 6) delle estrazioni storiche (solo i 6 principali).
+    Restituisce: (list_singoli, list_ambi, list_terni, occorrenze_spia, data_inizio, data_fine)
+    """
+    if numeri_array_storico is None or len(numeri_array_storico) == 0:
+        if log_callback: log_callback("ERRORE (Spia SE): Dati storici SuperEnalotto mancanti.")
+        return [], [], [], 0, None, None
+    if not numeri_spia_target:
+        if log_callback: log_callback("ERRORE (Spia SE): Nessun numero spia fornito.")
+        return [], [], [], 0, None, None
+    if numeri_array_storico.shape[1] != 6:
+        if log_callback: log_callback(f"ERRORE (Spia SE): L'array storico deve avere 6 colonne, ne ha {numeri_array_storico.shape[1]}.")
+        return [], [], [], 0, None, None
+
+
+    num_estrazioni = len(numeri_array_storico)
+    if num_estrazioni <= colpi_successivi:
+        if log_callback: log_callback(f"ATT (Spia SE): Dati insuff. ({num_estrazioni} estr.) per analizzare {colpi_successivi} colpi.")
+        return [], [], [], 0, None, None
+
+    frequenze_singoli = Counter()
+    frequenze_ambi = Counter()
+    frequenze_terni = Counter()
+    occorrenze_spia_trovate = 0
+    
+    data_inizio_scan, data_fine_scan = "N/A", "N/A"
+    if date_array_storico is not None and len(date_array_storico) == num_estrazioni:
+        try:
+            valid_dates = date_array_storico[~pd.isna(date_array_storico)]
+            if len(valid_dates) > 0:
+                data_inizio_scan = pd.to_datetime(valid_dates.min()).strftime('%Y-%m-%d')
+                data_fine_scan = pd.to_datetime(valid_dates.max()).strftime('%Y-%m-%d')
+        except Exception: pass 
+    if log_callback: log_callback(f"Analisi Spia SE: Scansione {num_estrazioni} estrazioni (Periodo: {data_inizio_scan} - {data_fine_scan}).")
+
+    numeri_spia_set = set(numeri_spia_target)
+
+    for i in range(num_estrazioni - colpi_successivi):
+        if stop_event and stop_event.is_set(): break
+        
+        estrazione_corrente_set = set(numeri_array_storico[i])
+        if numeri_spia_set.issubset(estrazione_corrente_set): # Se tutti i numeri spia sono presenti
+            occorrenze_spia_trovate += 1
+            for k in range(1, colpi_successivi + 1):
+                if stop_event and stop_event.is_set(): break
+                idx_succ = i + k
+                if idx_succ < num_estrazioni:
+                    estrazione_succ = numeri_array_storico[idx_succ]
+                    # Numeri validi (1-90) nell'estrazione successiva, escludendo i numeri spia stessi
+                    estrazione_succ_valid_numeri = [n for n in estrazione_succ if 1 <= n <= 90 and n not in numeri_spia_set]
+                    
+                    frequenze_singoli.update(estrazione_succ_valid_numeri)
+                    if len(estrazione_succ_valid_numeri) >= 2:
+                        frequenze_ambi.update(itertools.combinations(sorted(estrazione_succ_valid_numeri), 2))
+                    if len(estrazione_succ_valid_numeri) >= 3:
+                        frequenze_terni.update(itertools.combinations(sorted(estrazione_succ_valid_numeri), 3))
+        
+        if i > 0 and i % 1000 == 0 and log_callback: log_callback(f"Analisi Spia SE: Elaborate {i}/{num_estrazioni - colpi_successivi}...")
+
+    if log_callback and not (stop_event and stop_event.is_set()):
+         log_callback(f"Analisi Spia SE: Trovate {occorrenze_spia_trovate} occorrenze dei numeri spia {numeri_spia_target}.")
+    
+    return (frequenze_singoli.most_common(top_n_singoli),
+            frequenze_ambi.most_common(top_n_ambi),
+            frequenze_terni.most_common(top_n_terni),
+            occorrenze_spia_trovate, data_inizio_scan, data_fine_scan)
+
 
 # --- Callback per Logging Epoche (LogCallback INVARIATA) ---
 class LogCallback(tf.keras.callbacks.Callback):
@@ -808,26 +881,34 @@ def analisi_superenalotto(file_path, start_date, end_date, sequence_length=5,
 class AppSuperEnalotto:
     def __init__(self, root):
         self.root = root
-        self.root.title("Analisi e Previsione SuperEnalotto ML (v1.4 - FE & CV)") # Titolo aggiornato
-        self.root.geometry("850x980") # Leggermente più alta per CV
+        self.root.title("Analisi e Previsione SuperEnalotto (v1.5 - Spia Integrata)") # Aggiorna versione se vuoi
+        self.root.geometry("850x1180") # Altezza leggermente aumentata per la sezione spia
 
         self.style = ttk.Style()
-        try:
+        try: 
             if sys.platform == "win32": self.style.theme_use('vista')
             elif sys.platform == "darwin": self.style.theme_use('aqua')
-            else: self.style.theme_use('clam')
+            else: self.style.theme_use('clam') 
         except tk.TclError: self.style.theme_use('default')
 
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Variabili di stato per Previsione ML
         self.last_prediction_numbers = None
-        self.last_prediction_full = None
+        self.last_prediction_full = None # Per conservare anche le probabilità
         self.last_prediction_end_date = None
         self.last_prediction_date_str = None
 
+        # Variabili di Stato per Spia SuperEnalotto
+        self.last_spia_se_singoli = None
+        self.last_spia_se_ambi = None
+        self.last_spia_se_terni = None
+        self.last_spia_se_data_fine_analisi = None
+        self.last_spia_se_numeri_input = None
+
         # --- Input File/URL ---
-        self.file_frame = ttk.LabelFrame(self.main_frame, text="Origine Dati Estrazioni (URL Raw GitHub o Percorso File Locale .txt)", padding="10")
+        self.file_frame = ttk.LabelFrame(self.main_frame, text="Origine Dati Estrazioni (URL Raw GitHub o File Locale .txt)", padding="10")
         self.file_frame.pack(fill=tk.X, pady=5)
         self.file_path_var = tk.StringVar(value=DEFAULT_SUPERENALOTTO_DATA_URL)
         self.file_entry = ttk.Entry(self.file_frame, textvariable=self.file_path_var, width=65)
@@ -838,172 +919,213 @@ class AppSuperEnalotto:
         # --- Contenitore Parametri ---
         self.params_container = ttk.Frame(self.main_frame)
         self.params_container.pack(fill=tk.X, pady=5)
-        self.params_container.columnconfigure(0, weight=1)
-        self.params_container.columnconfigure(1, weight=1)
+        self.params_container.columnconfigure(0, weight=1) # Colonna sinistra
+        self.params_container.columnconfigure(1, weight=1) # Colonna destra
 
-        # --- Colonna Sinistra: Parametri Dati ---
-        self.data_params_frame = ttk.LabelFrame(self.params_container, text="Parametri Dati e Previsione", padding="10")
+        # --- Colonna Sinistra: Parametri Dati e Previsione ML ---
+        self.data_params_frame = ttk.LabelFrame(self.params_container, text="Parametri Dati e Previsione ML", padding="10")
         self.data_params_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="nsew")
-        current_row_data = 0
-
-        ttk.Label(self.data_params_frame, text="Data Inizio:").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
-        default_start = datetime.now() - pd.Timedelta(days=1825) # Aumentato a 5 anni
+        
+        _cur_row_data_ml = 0 # Contatore per le righe in questo frame
+        
+        ttk.Label(self.data_params_frame, text="Data Inizio:").grid(row=_cur_row_data_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        # MODIFICA QUI LA DATA DI DEFAULT PER L'INIZIO
+        default_start_ml = datetime(2025, 1, 1) # Impostato al 1 Gennaio 2025
+        
         if HAS_TKCALENDAR:
-             self.start_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd', show_weeknumbers=False, locale='it_IT')
-             try: self.start_date_entry.set_date(default_start)
-             except ValueError: self.start_date_entry.set_date(datetime.now() - pd.Timedelta(days=365))
-             self.start_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
+            self.start_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd', show_weeknumbers=False, locale='it_IT',
+                                              year=default_start_ml.year, month=default_start_ml.month, day=default_start_ml.day) # Imposta direttamente nel costruttore
+            # try: 
+            #     self.start_date_entry.set_date(default_start_ml) # Alternativa se il costruttore non funziona come previsto
+            # except ValueError: 
+            #     self.start_date_entry.set_date(datetime.now()) # Fallback generico
         else:
-            self.start_date_entry_var = tk.StringVar(value=default_start.strftime('%Y-%m-%d'))
+            self.start_date_entry_var = tk.StringVar(value=default_start_ml.strftime('%Y-%m-%d')) 
             self.start_date_entry = ttk.Entry(self.data_params_frame, textvariable=self.start_date_entry_var, width=12)
-            self.start_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
-            # ttk.Label(self.data_params_frame, text="(yyyy-mm-dd)").grid(row=current_row_data, column=2, padx=2, pady=5, sticky=tk.W)
-        current_row_data += 1
-
-        ttk.Label(self.data_params_frame, text="Data Fine:").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
-        default_end = datetime.now()
+        self.start_date_entry.grid(row=_cur_row_data_ml, column=1, padx=5, pady=2, sticky=tk.W)
+        _cur_row_data_ml += 1
+        
+        ttk.Label(self.data_params_frame, text="Data Fine:").grid(row=_cur_row_data_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        default_end_ml = datetime.now() # Lasciamo la data di fine a "oggi" per default
         if HAS_TKCALENDAR:
-             self.end_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd', show_weeknumbers=False, locale='it_IT')
-             self.end_date_entry.set_date(default_end)
-             self.end_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
+            self.end_date_entry = DateEntry(self.data_params_frame, width=12, date_pattern='yyyy-mm-dd', show_weeknumbers=False, locale='it_IT',
+                                            year=default_end_ml.year, month=default_end_ml.month, day=default_end_ml.day)
+            # self.end_date_entry.set_date(default_end_ml) # Alternativa
         else:
-            self.end_date_entry_var = tk.StringVar(value=default_end.strftime('%Y-%m-%d'))
+            self.end_date_entry_var = tk.StringVar(value=default_end_ml.strftime('%Y-%m-%d')) 
             self.end_date_entry = ttk.Entry(self.data_params_frame, textvariable=self.end_date_entry_var, width=12)
-            self.end_date_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
-            # ttk.Label(self.data_params_frame, text="(yyyy-mm-dd)").grid(row=current_row_data, column=2, padx=2, pady=5, sticky=tk.W)
-        current_row_data += 1
+        self.end_date_entry.grid(row=_cur_row_data_ml, column=1, padx=5, pady=2, sticky=tk.W)
+        _cur_row_data_ml += 1
 
-        ttk.Label(self.data_params_frame, text="Seq. Input (Storia):").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
-        self.seq_len_var = tk.StringVar(value="12") # Aumentato default
+        ttk.Label(self.data_params_frame, text="Seq. Input (Storia):").grid(row=_cur_row_data_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        self.seq_len_var = tk.StringVar(value="12") 
         self.seq_len_entry = ttk.Spinbox(self.data_params_frame, from_=3, to=50, increment=1, textvariable=self.seq_len_var, width=5, wrap=True, state='readonly')
-        self.seq_len_entry.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
-        current_row_data += 1
+        self.seq_len_entry.grid(row=_cur_row_data_ml, column=1, padx=5, pady=2, sticky=tk.W)
+        _cur_row_data_ml += 1
 
-        ttk.Label(self.data_params_frame, text="Numeri da Prevedere:").grid(row=current_row_data, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(self.data_params_frame, text="Numeri da Prevedere:").grid(row=_cur_row_data_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.num_predict_var = tk.StringVar(value="6")
         self.num_predict_spinbox = ttk.Spinbox(self.data_params_frame, from_=6, to=15, increment=1, textvariable=self.num_predict_var, width=5, wrap=True, state='readonly')
-        self.num_predict_spinbox.grid(row=current_row_data, column=1, padx=5, pady=5, sticky=tk.W)
-        current_row_data += 1
+        self.num_predict_spinbox.grid(row=_cur_row_data_ml, column=1, padx=5, pady=2, sticky=tk.W)
+        _cur_row_data_ml += 1
 
-        # --- Colonna Destra: Parametri Modello e Training ---
-        self.model_params_frame = ttk.LabelFrame(self.params_container, text="Configurazione Modello e Training", padding="10")
+        # --- Colonna Destra: Parametri Modello ML e Training ---
+        self.model_params_frame = ttk.LabelFrame(self.params_container, text="Configurazione Modello ML e Training", padding="10")
         self.model_params_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="nsew")
-        self.model_params_frame.columnconfigure(1, weight=1)
-        current_row_model = 0
+        self.model_params_frame.columnconfigure(1, weight=1) 
+        
+        _cur_row_model_ml = 0 
 
-        ttk.Label(self.model_params_frame, text="Hidden Layers (n,n,..):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
-        self.hidden_layers_var = tk.StringVar(value="128, 64") # Ridotto default
+        ttk.Label(self.model_params_frame, text="Hidden Layers (n,n,..):").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        self.hidden_layers_var = tk.StringVar(value="128, 64") 
         self.hidden_layers_entry = ttk.Entry(self.model_params_frame, textvariable=self.hidden_layers_var, width=25)
-        self.hidden_layers_entry.grid(row=current_row_model, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row_model += 1
+        self.hidden_layers_entry.grid(row=_cur_row_model_ml, column=1, columnspan=2, padx=5, pady=2, sticky=tk.EW); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="Loss Function:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="Loss Function:").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.loss_var = tk.StringVar(value='binary_crossentropy')
         self.loss_combo = ttk.Combobox(self.model_params_frame, textvariable=self.loss_var, width=23, state='readonly', values=['binary_crossentropy', 'mse', 'mae', 'huber_loss'])
-        self.loss_combo.grid(row=current_row_model, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row_model += 1
+        self.loss_combo.grid(row=_cur_row_model_ml, column=1, columnspan=2, padx=5, pady=2, sticky=tk.EW); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="Optimizer:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="Optimizer:").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.optimizer_var = tk.StringVar(value='adam')
         self.optimizer_combo = ttk.Combobox(self.model_params_frame, textvariable=self.optimizer_var, width=23, state='readonly', values=['adam', 'rmsprop', 'sgd', 'adagrad', 'adamw'])
-        self.optimizer_combo.grid(row=current_row_model, column=1, columnspan=2, padx=5, pady=3, sticky=tk.EW); current_row_model += 1
+        self.optimizer_combo.grid(row=_cur_row_model_ml, column=1, columnspan=2, padx=5, pady=2, sticky=tk.EW); _cur_row_model_ml += 1
 
-        # Parametri su righe separate per chiarezza
-        ttk.Label(self.model_params_frame, text="Dropout Rate (0-1):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
-        self.dropout_var = tk.StringVar(value="0.25") # Ridotto default
+        ttk.Label(self.model_params_frame, text="Dropout Rate (0-1):").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        self.dropout_var = tk.StringVar(value="0.25") 
         self.dropout_spinbox = ttk.Spinbox(self.model_params_frame, from_=0.0, to=0.8, increment=0.05, format="%.2f", textvariable=self.dropout_var, width=7, wrap=True, state='readonly')
-        self.dropout_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.dropout_spinbox.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="L1 Strength (>=0):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="L1 Strength (>=0):").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.l1_var = tk.StringVar(value="0.00")
         self.l1_entry = ttk.Entry(self.model_params_frame, textvariable=self.l1_var, width=7)
-        self.l1_entry.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.l1_entry.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="L2 Strength (>=0):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="L2 Strength (>=0):").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.l2_var = tk.StringVar(value="0.00")
         self.l2_entry = ttk.Entry(self.model_params_frame, textvariable=self.l2_var, width=7)
-        self.l2_entry.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.l2_entry.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="Max Epoche:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
-        self.epochs_var = tk.StringVar(value="100") # Ridotto default
+        ttk.Label(self.model_params_frame, text="Max Epoche:").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        self.epochs_var = tk.StringVar(value="100") 
         self.epochs_spinbox = ttk.Spinbox(self.model_params_frame, from_=20, to=500, increment=10, textvariable=self.epochs_var, width=7, wrap=True, state='readonly')
-        self.epochs_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.epochs_spinbox.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="Batch Size:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
-        self.batch_size_var = tk.StringVar(value="128") # Aumentato default
-        batch_values = [str(2**i) for i in range(4, 10)] # 16 a 512
-        self.batch_size_combo = ttk.Combobox(self.model_params_frame, textvariable=self.batch_size_var, values=batch_values, width=5, state='readonly')
-        self.batch_size_combo.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        ttk.Label(self.model_params_frame, text="Batch Size:").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        self.batch_size_var = tk.StringVar(value="128") 
+        self.batch_size_combo = ttk.Combobox(self.model_params_frame, textvariable=self.batch_size_var, values=[str(2**i) for i in range(4, 10)], width=5, state='readonly')
+        self.batch_size_combo.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="ES Patience:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
-        self.patience_var = tk.StringVar(value="15") # Default ok
+        ttk.Label(self.model_params_frame, text="ES Patience:").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
+        self.patience_var = tk.StringVar(value="15") 
         self.patience_spinbox = ttk.Spinbox(self.model_params_frame, from_=5, to=50, increment=1, textvariable=self.patience_var, width=7, wrap=True, state='readonly')
-        self.patience_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.patience_spinbox.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        ttk.Label(self.model_params_frame, text="ES Min Delta:").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="ES Min Delta:").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.min_delta_var = tk.StringVar(value="0.0001")
         self.min_delta_entry = ttk.Entry(self.model_params_frame, textvariable=self.min_delta_var, width=10)
-        self.min_delta_entry.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.min_delta_entry.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        # NUOVO: Parametro CV Splits
-        ttk.Label(self.model_params_frame, text="CV Splits (>=2):").grid(row=current_row_model, column=0, padx=5, pady=3, sticky=tk.W)
+        ttk.Label(self.model_params_frame, text="CV Splits (>=2):").grid(row=_cur_row_model_ml, column=0, padx=5, pady=2, sticky=tk.W)
         self.cv_splits_var = tk.StringVar(value=str(DEFAULT_SUPERENALOTTO_CV_SPLITS))
         self.cv_splits_spinbox = ttk.Spinbox(self.model_params_frame, from_=2, to=20, increment=1, textvariable=self.cv_splits_var, width=5, wrap=True, state='readonly')
-        self.cv_splits_spinbox.grid(row=current_row_model, column=1, padx=5, pady=3, sticky=tk.W); current_row_model += 1
+        self.cv_splits_spinbox.grid(row=_cur_row_model_ml, column=1, padx=5, pady=2, sticky=tk.W); _cur_row_model_ml += 1
 
-        # --- Pulsanti Azione ---
-        self.action_frame = ttk.Frame(self.main_frame)
-        self.action_frame.pack(pady=10)
-        self.run_button = ttk.Button(self.action_frame, text="Avvia Analisi e Previsione", command=self.start_analysis_thread)
-        self.run_button.pack(side=tk.LEFT, padx=10)
-        # NUOVO: Pulsante Stop
-        self.stop_button = ttk.Button(self.action_frame, text="Ferma Analisi", command=self.stop_analysis_thread, state=tk.DISABLED)
+        # --- Pulsanti Azione ML ---
+        # Se action_frame è già stato definito prima, non ridefinirlo. 
+        # Altrimenti, questo è il posto corretto.
+        self.action_frame = ttk.Frame(self.main_frame) 
+        self.action_frame.pack(pady=5, fill=tk.X)
+        self.run_button = ttk.Button(self.action_frame, text="Avvia Analisi ML", command=self.start_analysis_thread)
+        self.run_button.pack(side=tk.LEFT, padx=5)
+        self.stop_button = ttk.Button(self.action_frame, text="Ferma Analisi ML", command=self.stop_analysis_thread, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=5)
-
-        self.check_button = ttk.Button(self.action_frame, text="Verifica Ultima Previsione", command=self.start_check_thread, state=tk.DISABLED)
+        self.check_button = ttk.Button(self.action_frame, text="Verifica Prev. ML", command=self.start_check_thread, state=tk.DISABLED)
         self.check_button.pack(side=tk.LEFT, padx=5)
-        ttk.Label(self.action_frame, text="Colpi Verifica:").pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Label(self.action_frame, text="Colpi Verifica ML:").pack(side=tk.LEFT, padx=(10, 2))
         self.check_colpi_var = tk.StringVar(value=str(DEFAULT_SUPERENALOTTO_CHECK_COLPI))
         self.check_colpi_spinbox = ttk.Spinbox(self.action_frame, from_=1, to=100, increment=1, textvariable=self.check_colpi_var, width=4, wrap=True, state='readonly')
         self.check_colpi_spinbox.pack(side=tk.LEFT, padx=(0, 10))
 
-        # --- Risultati Previsione ---
-        self.results_frame = ttk.LabelFrame(self.main_frame, text="Risultato Previsione SuperEnalotto (Numeri più probabili)", padding="10")
+        # --- Risultati Previsione ML ---
+        self.results_frame = ttk.LabelFrame(self.main_frame, text="Risultato Previsione SuperEnalotto (ML)", padding="10")
         self.results_frame.pack(fill=tk.X, pady=5)
-        self.result_label_var = tk.StringVar(value="I numeri previsti appariranno qui...")
-        self.result_label = ttk.Label(self.results_frame, textvariable=self.result_label_var, font=('Courier New', 16, 'bold'), foreground='#000080') # Blu scuro
+        self.result_label_var = tk.StringVar(value="I numeri ML previsti appariranno qui...")
+        self.result_label = ttk.Label(self.results_frame, textvariable=self.result_label_var, font=('Courier New', 16, 'bold'), foreground='#000080')
         self.result_label.pack(pady=5)
         self.attendibilita_label_var = tk.StringVar(value="")
         self.attendibilita_label = ttk.Label(self.results_frame, textvariable=self.attendibilita_label_var, font=('Helvetica', 9, 'italic'))
-        self.attendibilita_label.pack(pady=2, fill=tk.X) # Fill per andare a capo
+        self.attendibilita_label.pack(pady=2, fill=tk.X)
 
-        # --- Data Ultimo Aggiornamento Dati Usati ---
-        self.last_update_frame = ttk.LabelFrame(self.main_frame, text="Dati Utilizzati nell'Ultima Analisi", padding="5")
+        # --- Data Ultimo Aggiornamento Dati Usati (per ML) ---
+        self.last_update_frame = ttk.LabelFrame(self.main_frame, text="Dati Utilizzati nell'Ultima Analisi ML", padding="5")
         self.last_update_frame.pack(fill=tk.X, pady=5)
-        self.last_update_label_var = tk.StringVar(value="Data ultimo aggiornamento usato apparirà qui...")
+        self.last_update_label_var = tk.StringVar(value="Data ultimo aggiornamento usato (ML) apparirà qui...")
         self.last_update_label = ttk.Label(self.last_update_frame, textvariable=self.last_update_label_var, font=('Helvetica', 9))
-        self.last_update_label.pack(pady=3, anchor='w') # Allineato a sx
+        self.last_update_label.pack(pady=3, anchor='w')
 
+        # --- Frame e Controlli per Analisi Numeri Spia SuperEnalotto ---
+        self.spia_se_frame = ttk.LabelFrame(self.main_frame, text="Analisi Numeri Spia SuperEnalotto (su periodo date sopra)", padding="10")
+        self.spia_se_frame.pack(fill=tk.X, pady=(10,5), padx=0)
+
+        spia_se_params_r1 = ttk.Frame(self.spia_se_frame) 
+        spia_se_params_r1.pack(fill=tk.X, pady=2)
+        ttk.Label(spia_se_params_r1, text="Numeri Spia (es: 7,23):").pack(side=tk.LEFT, padx=(0,5))
+        self.numeri_spia_se_var = tk.StringVar(value="7,23") 
+        self.numeri_spia_se_entry = ttk.Entry(spia_se_params_r1, textvariable=self.numeri_spia_se_var, width=15)
+        self.numeri_spia_se_entry.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(spia_se_params_r1, text="Colpi An. Post-Spia:").pack(side=tk.LEFT, padx=(0,5))
+        self.spia_se_colpi_var = tk.StringVar(value="3") 
+        self.spia_se_colpi_spinbox = ttk.Spinbox(spia_se_params_r1, from_=1, to=10, textvariable=self.spia_se_colpi_var, width=4, state='readonly', wrap=True)
+        self.spia_se_colpi_spinbox.pack(side=tk.LEFT, padx=(0,10))
+
+        spia_se_params_r2 = ttk.Frame(self.spia_se_frame) 
+        spia_se_params_r2.pack(fill=tk.X, pady=2)
+        ttk.Label(spia_se_params_r2, text="Top N Singoli:").pack(side=tk.LEFT, padx=(0,5))
+        self.spia_se_top_n_singoli_var = tk.StringVar(value="6")
+        self.spia_se_top_n_singoli_spinbox = ttk.Spinbox(spia_se_params_r2, from_=1, to=15, textvariable=self.spia_se_top_n_singoli_var, width=4, state='readonly', wrap=True)
+        self.spia_se_top_n_singoli_spinbox.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(spia_se_params_r2, text="Top N Ambi:").pack(side=tk.LEFT, padx=(0,5))
+        self.spia_se_top_n_ambi_var = tk.StringVar(value="5")
+        self.spia_se_top_n_ambi_spinbox = ttk.Spinbox(spia_se_params_r2, from_=1, to=10, textvariable=self.spia_se_top_n_ambi_var, width=4, state='readonly', wrap=True)
+        self.spia_se_top_n_ambi_spinbox.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(spia_se_params_r2, text="Top N Terni:").pack(side=tk.LEFT, padx=(0,5))
+        self.spia_se_top_n_terni_var = tk.StringVar(value="3")
+        self.spia_se_top_n_terni_spinbox = ttk.Spinbox(spia_se_params_r2, from_=1, to=5, textvariable=self.spia_se_top_n_terni_var, width=4, state='readonly', wrap=True)
+        self.spia_se_top_n_terni_spinbox.pack(side=tk.LEFT, padx=(0,10))
+
+        spia_se_actions = ttk.Frame(self.spia_se_frame) 
+        spia_se_actions.pack(fill=tk.X, pady=(5,2))
+        self.run_spia_se_button = ttk.Button(spia_se_actions, text="Avvia Analisi Spie SE", command=self.start_analisi_spia_superenalotto_thread)
+        self.run_spia_se_button.pack(side=tk.LEFT, padx=(0,10))
+        self.check_spia_se_button = ttk.Button(spia_se_actions, text="Verifica Ris. Spia SE", command=self.start_verifica_spia_superenalotto_thread, state=tk.DISABLED)
+        self.check_spia_se_button.pack(side=tk.LEFT, padx=(0,10))
+        ttk.Label(spia_se_actions, text="Colpi Verifica Spia SE:").pack(side=tk.LEFT, padx=(10,2))
+        self.check_spia_se_colpi_var = tk.StringVar(value=str(DEFAULT_SUPERENALOTTO_CHECK_COLPI))
+        self.check_spia_se_colpi_spinbox = ttk.Spinbox(spia_se_actions, from_=1, to=20, textvariable=self.check_spia_se_colpi_var, width=4, state='readonly', wrap=True)
+        self.check_spia_se_colpi_spinbox.pack(side=tk.LEFT)
+        
         # --- Log Area ---
         self.log_frame = ttk.LabelFrame(self.main_frame, text="Log Elaborazione", padding="10")
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=(5,0))
         log_font = ("Consolas", 9) if sys.platform == "win32" else ("Monaco", 9)
         try:
-            self.log_text = scrolledtext.ScrolledText(self.log_frame, height=18, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f5f5f5', foreground='black')
-        except tk.TclError: # Fallback font
-             log_font = ("Courier New", 9)
-             self.log_text = scrolledtext.ScrolledText(self.log_frame, height=18, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f5f5f5', foreground='black')
+            self.log_text = scrolledtext.ScrolledText(self.log_frame, height=12, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f5f5f5', foreground='black')
+        except tk.TclError: 
+             log_font = ("Courier New", 9) 
+             self.log_text = scrolledtext.ScrolledText(self.log_frame, height=12, width=90, wrap=tk.WORD, state=tk.DISABLED, font=log_font, background='#f5f5f5', foreground='black')
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        # --- Threading Safety (Aggiunto stop_event) ---
-        self.analysis_thread = None
-        self.check_thread = None
-        self._stop_event_analysis = threading.Event() # Evento per fermare l'analisi
-        self._stop_event_check = threading.Event()    # Evento per fermare la verifica (anche se non c'è bottone stop)
+        # --- Threading Safety ---
+        self.analysis_thread = None; self.check_thread = None
+        self.spia_se_thread = None; self.verifica_spia_se_thread = None 
+        
+        self._stop_event_analysis = threading.Event()
+        self._stop_event_check = threading.Event()
+        self._stop_event_spia_se = threading.Event() 
+        self._stop_event_verifica_spia_se = threading.Event() 
 
-        # Intercetta chiusura finestra
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-
-    # --- Metodi GUI (browse_file, log_message_gui, set_result, _update_result_labels INVARIATI) ---
 
     def browse_file(self):
         """Apre una finestra di dialogo per selezionare un file LOCALE."""
@@ -1056,19 +1178,24 @@ class AppSuperEnalotto:
         """Abilita o disabilita i controlli della GUI."""
         self.root.after(10, lambda: self._set_controls_state_tk(state))
 
+# 2. Modifica _set_controls_state_tk
     def _set_controls_state_tk(self, state):
-        """Funzione helper eseguita nel thread GUI per modificare lo stato dei widget."""
         try:
             if not self.root.winfo_exists(): return
 
-            # Determina lo stato generale basato sui thread attivi
             is_analysis_running = self.analysis_thread and self.analysis_thread.is_alive()
             is_check_running = self.check_thread and self.check_thread.is_alive()
-            is_running = is_analysis_running or is_check_running
+            # NUOVO: controlli per thread spia SE
+            is_spia_se_running = self.spia_se_thread and self.spia_se_thread.is_alive()
+            is_verifica_spia_se_running = self.verifica_spia_se_thread and self.verifica_spia_se_thread.is_alive()
+            
+            is_any_ml_action_running = is_analysis_running or is_check_running
+            is_any_spia_se_action_running = is_spia_se_running or is_verifica_spia_se_running
+            is_any_thread_running = is_any_ml_action_running or is_any_spia_se_action_running
 
-            # Stato target principale: DISABLED se qualcosa è in esecuzione, altrimenti lo stato richiesto
-            target_state_general = tk.DISABLED if is_running else state
+            target_state_general = tk.DISABLED if is_any_thread_running else state
 
+            # Aggiungi i nuovi widget spia SE alla lista
             widgets_to_toggle = [
                 self.browse_button, self.file_entry,
                 self.seq_len_entry, self.num_predict_spinbox,
@@ -1076,51 +1203,451 @@ class AppSuperEnalotto:
                 self.dropout_spinbox, self.l1_entry, self.l2_entry,
                 self.epochs_spinbox, self.batch_size_combo,
                 self.patience_spinbox, self.min_delta_entry,
-                self.cv_splits_spinbox, # NUOVO: Aggiunto spinbox CV
-                self.run_button, self.check_colpi_spinbox, self.check_button
+                self.cv_splits_spinbox, 
+                self.run_button, self.stop_button, # Assumendo che stop_button esista
+                self.check_colpi_spinbox, self.check_button,
+                # NUOVI WIDGET SPIA SE
+                self.numeri_spia_se_entry, self.spia_se_colpi_spinbox,
+                self.spia_se_top_n_singoli_spinbox, self.spia_se_top_n_ambi_spinbox, self.spia_se_top_n_terni_spinbox,
+                self.run_spia_se_button, self.check_spia_se_button, self.check_spia_se_colpi_spinbox
             ]
-            # Gestione DateEntry/Entry
-            if HAS_TKCALENDAR and hasattr(self.start_date_entry, 'configure'):
-                 widgets_to_toggle.extend([self.start_date_entry, self.end_date_entry])
-            elif not HAS_TKCALENDAR:
-                 widgets_to_toggle.extend([self.start_date_entry_var, self.end_date_entry_var]) # Usa le variabili per Entry normali
+            # ... (logica per DateEntry come prima) ...
+            date_entries_to_handle = [] # Popolala come nella versione precedente
+            if HAS_TKCALENDAR:
+                if hasattr(self, 'start_date_entry'): date_entries_to_handle.append(self.start_date_entry)
+                if hasattr(self, 'end_date_entry'): date_entries_to_handle.append(self.end_date_entry)
+            else:
+                if hasattr(self, 'start_date_entry'): widgets_to_toggle.append(self.start_date_entry) # Se ttk.Entry
+                if hasattr(self, 'end_date_entry'): widgets_to_toggle.append(self.end_date_entry)   # Se ttk.Entry
+
 
             for widget in widgets_to_toggle:
                 if widget is None or not hasattr(widget, 'winfo_exists') or not widget.winfo_exists(): continue
-                widget_state = target_state_general
+                
+                current_widget_target_state = target_state_general
 
-                # Eccezioni: Check button dipende anche da last_prediction
-                if widget == self.check_button:
-                    if target_state_general == tk.NORMAL and self.last_prediction_numbers:
-                        widget_state = tk.NORMAL
-                    else:
-                        widget_state = tk.DISABLED
+                # Disabilita pulsanti di un gruppo se l'altro è attivo
+                if state == tk.NORMAL: # Solo se si sta cercando di abilitare
+                    if widget in [self.run_button, self.check_button] and is_any_spia_se_action_running:
+                        current_widget_target_state = tk.DISABLED
+                    if widget in [self.run_spia_se_button, self.check_spia_se_button] and is_any_ml_action_running:
+                        current_widget_target_state = tk.DISABLED
+                
+                # Logica specifica per pulsanti di verifica
+                if widget == self.check_button and current_widget_target_state == tk.NORMAL and self.last_prediction_numbers is None:
+                    current_widget_target_state = tk.DISABLED
+                if widget == self.check_spia_se_button and current_widget_target_state == tk.NORMAL and not (self.last_spia_se_singoli or self.last_spia_se_ambi or self.last_spia_se_terni):
+                    current_widget_target_state = tk.DISABLED
+                
+                # Stato bottone Stop ML
+                if widget == self.stop_button: # Assumendo che self.stop_button esista
+                    current_widget_target_state = tk.NORMAL if is_analysis_running else tk.DISABLED
 
-                # Eccezioni: Run button disabilitato se check è attivo (anche se lo stato richiesto è NORMAL)
-                if widget == self.run_button and is_check_running:
-                    widget_state = tk.DISABLED
 
-                # Imposta lo stato
+                # Applica stato effettivo
+                tk_effective_state = tk.DISABLED
+                if current_widget_target_state == tk.NORMAL:
+                    if isinstance(widget, (ttk.Combobox, ttk.Spinbox)): tk_effective_state = 'readonly'
+                    elif isinstance(widget, (ttk.Entry, scrolledtext.ScrolledText)): tk_effective_state = tk.NORMAL
+                    elif isinstance(widget, ttk.Button): tk_effective_state = tk.NORMAL
+                
                 try:
-                    current_class = widget.winfo_class()
-                    target_tk_state = tk.DISABLED # Default
-                    if widget_state == tk.NORMAL:
-                         if current_class in ('TCombobox', 'TSpinbox'): target_tk_state = 'readonly'
-                         elif current_class == 'DateEntry' and HAS_TKCALENDAR: target_tk_state = tk.NORMAL
-                         elif current_class == 'TEntry' or current_class == 'Entry': target_tk_state = tk.NORMAL
-                         elif current_class == 'TButton': target_tk_state = tk.NORMAL
-                    # Confronta e applica solo se diverso
-                    if str(widget.cget('state')).lower() != str(target_tk_state).lower():
-                        widget.config(state=target_tk_state)
-                except (tk.TclError, AttributeError) as e_widget:
-                     print(f"Warning: Could not set state for widget {widget}: {e_widget}")
+                    if str(widget.cget('state')).lower() != str(tk_effective_state).lower():
+                        widget.config(state=tk_effective_state)
+                except (tk.TclError, AttributeError): pass
+            
+            # Gestione DateEntry tkcalendar
+            for date_widget in date_entries_to_handle:
+                if date_widget and hasattr(date_widget, 'winfo_exists') and date_widget.winfo_exists():
+                    target_date_state = tk.NORMAL if target_state_general == tk.NORMAL else tk.DISABLED
+                    if str(date_widget.cget('state')).lower() != str(target_date_state).lower():
+                        date_widget.configure(state=target_date_state)
+        except Exception as e: print(f"Errore _set_controls_state_tk SE: {e}\n{traceback.format_exc()}")
 
-            # Gestione specifica bottone STOP
-            if self.stop_button and self.stop_button.winfo_exists():
-                self.stop_button.config(state=tk.NORMAL if is_analysis_running else tk.DISABLED)
 
-        except tk.TclError as e: print(f"TclError in _set_controls_state_tk (shutdown?): {e}")
-        except Exception as e: print(f"Error setting control states: {e}")
+    def _get_spia_se_dates(self): # Helper per le date, può essere lo stesso del 10eLotto se usi gli stessi widget
+        # Riusa _get_spia_dates se i widget delle date sono condivisi, 
+        # altrimenti crea una versione specifica se hai DateEntry separati per le spie SE.
+        # Per ora assumo che riusi gli stessi widget di data dell'analisi ML.
+        try:
+            s_date = self.start_date_entry.get_date().strftime('%Y-%m-%d') if HAS_TKCALENDAR else self.start_date_entry_var.get() # Adatta se usi var separate per Entry
+            e_date = self.end_date_entry.get_date().strftime('%Y-%m-%d') if HAS_TKCALENDAR else self.end_date_entry_var.get() # Adatta
+            datetime.strptime(s_date, '%Y-%m-%d'); datetime.strptime(e_date, '%Y-%m-%d') 
+            return s_date, e_date
+        except Exception as e: messagebox.showerror("Errore Data (Spia SE)", f"Date non valide: {e}", parent=self.root); return None, None
+
+    def _validate_spia_se_params(self, data_source, numeri_spia_str, start_date, end_date, colpi_an_str, top_s_str, top_a_str, top_t_str):
+        # Questa funzione può essere quasi identica a _validate_spia_params del 10eLotto
+        # Cambia solo i messaggi di errore se vuoi specificare "Spia SE"
+        errors = {'messages': [], 'parsed': {}}
+        if not data_source or (not data_source.startswith("http") and not os.path.exists(data_source)): errors['messages'].append("Sorgente dati SE non valida.")
+        try:
+            if datetime.strptime(start_date, '%Y-%m-%d') > datetime.strptime(end_date, '%Y-%m-%d'): errors['messages'].append("Data Inizio Spia SE > Data Fine Spia SE.")
+        except ValueError: errors['messages'].append("Formato date Spia SE non valido.")
+
+        try: 
+            parsed_nums = [int(n.strip()) for n in numeri_spia_str.split(',') if n.strip() and 1 <= int(n.strip()) <= 90]
+            if not parsed_nums: raise ValueError()
+            errors['parsed']['numeri_spia'] = parsed_nums
+        except: errors['messages'].append("Numeri Spia SE non validi (1-90, separati da ',').")
+        
+        try: errors['parsed']['colpi_analizzare'] = int(colpi_an_str); assert 1 <= errors['parsed']['colpi_analizzare'] <= 10
+        except: errors['messages'].append("Colpi Analisi Spia SE (1-10).")
+        try: errors['parsed']['top_n_singoli'] = int(top_s_str); assert 1 <= errors['parsed']['top_n_singoli'] <= 15 # Adattato per SE
+        except: errors['messages'].append("Top N Singoli Spia SE (1-15).")
+        try: errors['parsed']['top_n_ambi'] = int(top_a_str); assert 1 <= errors['parsed']['top_n_ambi'] <= 10
+        except: errors['messages'].append("Top N Ambi Spia SE (1-10).")
+        try: errors['parsed']['top_n_terni'] = int(top_t_str); assert 1 <= errors['parsed']['top_n_terni'] <= 5
+        except: errors['messages'].append("Top N Terni Spia SE (1-5).")
+        return errors if errors['messages'] else None
+
+
+    # All'interno della classe AppSuperEnalotto
+
+    def start_analisi_spia_superenalotto_thread(self):
+        if any(t and t.is_alive() for t in [self.analysis_thread, self.check_thread, self.spia_se_thread, self.verifica_spia_se_thread]):
+            messagebox.showwarning("Operazione in Corso", "Attendere il termine dell'operazione corrente.", parent=self.root)
+            return
+
+        s_date, e_date = self._get_spia_se_dates() # Assumiamo che questo recuperi le date correttamente
+        if not s_date or not e_date: # Se _get_spia_se_dates ha restituito (None, None) o una delle due è None
+            # Il messaggio di errore dovrebbe essere già stato mostrato da _get_spia_se_dates
+            return 
+        
+        # Recupera i valori stringa dai widget
+        data_source_val = self.file_path_var.get().strip()
+        numeri_spia_str_val = self.numeri_spia_se_var.get().strip()
+        colpi_an_str_val = self.spia_se_colpi_var.get()
+        top_s_str_val = self.spia_se_top_n_singoli_var.get()
+        top_a_str_val = self.spia_se_top_n_ambi_var.get()
+        top_t_str_val = self.spia_se_top_n_terni_var.get()
+
+        validation_errors = self._validate_spia_se_params( # Rinomino per chiarezza
+            data_source_val, numeri_spia_str_val, 
+            s_date, e_date, 
+            colpi_an_str_val, top_s_str_val, 
+            top_a_str_val, top_t_str_val
+        )
+        
+        if validation_errors: # Se _validate_spia_se_params ha restituito un dizionario (cioè ci sono errori)
+            messagebox.showerror("Errore Parametri Spia SE", "\n\n".join(validation_errors['messages']), parent=self.root)
+            return
+        
+        # Se siamo qui, validation_errors è None, significa che non ci sono stati errori di validazione.
+        # Quindi, possiamo procedere a parsare i parametri con sicurezza.
+        try:
+            p = { # Dizionario per i parametri parsati
+                'numeri_spia': [int(x.strip()) for x in numeri_spia_str_val.split(',') if x.strip()],
+                'colpi_analizzare': int(colpi_an_str_val),
+                'top_n_singoli': int(top_s_str_val),
+                'top_n_ambi': int(top_a_str_val),
+                'top_n_terni': int(top_t_str_val)
+            }
+            # Ulteriore controllo post-parsing (anche se _validate_spia_se_params dovrebbe averli coperti)
+            if not p['numeri_spia'] or not all(1 <= n <= 90 for n in p['numeri_spia']):
+                raise ValueError("Numeri spia non validi dopo parsing.")
+            if not (1 <= p['colpi_analizzare'] <= 10): raise ValueError("Colpi analizzare fuori range.")
+            # ... Aggiungi controlli simili per top_n se necessario ...
+
+        except ValueError as e_parse:
+             messagebox.showerror("Errore Conversione Parametri", f"Errore durante la conversione dei parametri spia SE: {e_parse}", parent=self.root)
+             return
+
+        # Resetta i risultati precedenti dell'analisi spia SE
+        self.last_spia_se_singoli = None
+        self.last_spia_se_ambi = None
+        self.last_spia_se_terni = None
+        self.last_spia_se_data_fine_analisi = None
+        self.last_spia_se_numeri_input = p['numeri_spia'] # Salva i numeri spia usati per questa analisi
+        
+        self.set_controls_state(tk.DISABLED) # Disabilita i controlli
+        self.log_message_gui(f"\n=== Avvio Analisi Numeri Spia SuperEnalotto (Spia: {p['numeri_spia']}, Periodo: {s_date}-{e_date}) ===")
+        self.log_message_gui(f"Sorgente Dati: {'URL' if data_source_val.startswith('http') else 'File Locale'} ({os.path.basename(data_source_val)})")
+        self.log_message_gui(f"Colpi successivi da analizzare: {p['colpi_analizzare']}")
+        self.log_message_gui(f"Parametri Top N: Singoli={p['top_n_singoli']}, Ambi={p['top_n_ambi']}, Terni={p['top_n_terni']}")
+        self.log_message_gui("-" * 50)
+
+        self._stop_event_spia_se.clear() # Resetta l'evento di stop
+        self.spia_se_thread = threading.Thread(target=self.run_analisi_spia_superenalotto, 
+            args=(data_source_val, s_date, e_date, p['numeri_spia'], p['colpi_analizzare'], 
+                  p['top_n_singoli'], p['top_n_ambi'], p['top_n_terni'], self._stop_event_spia_se), 
+            daemon=True, name="SpiaSuperEnalottoThread")
+        self.spia_se_thread.start()
+
+    def run_analisi_spia_superenalotto(self, data_source, start_date_str, end_date_str, 
+                                     numeri_spia_list, colpi_an, 
+                                     top_s, top_a, top_t, stop_event):
+        try:
+            if stop_event.is_set():
+                self.log_message_gui("Analisi Spia SE: Annullata prima dell'inizio.")
+                return
+
+            self.log_message_gui(f"Analisi Spia SE: Caricamento dati per il periodo {start_date_str} - {end_date_str}...")
+            df_spia_original, arr_spia_se_main, _, _, _ = carica_dati_superenalotto(
+                data_source,
+                start_date=start_date_str, 
+                end_date=end_date_str,
+                log_callback=self.log_message_gui
+            )
+
+            if stop_event.is_set():
+                self.log_message_gui("Analisi Spia SE: Annullata dopo caricamento dati.")
+                return
+
+            if df_spia_original is None or df_spia_original.empty or arr_spia_se_main is None or len(arr_spia_se_main) == 0:
+                self.log_message_gui(f"ERRORE (Spia SE): Dati storici insufficienti o non caricati per il periodo {start_date_str} - {end_date_str}.")
+                self.last_spia_se_singoli = None; self.last_spia_se_ambi = None; self.last_spia_se_terni = None
+                self.last_spia_se_data_fine_analisi = None
+                return
+            
+            date_arr_spia_se_aligned = None
+            try:
+                df_temp_for_alignment = df_spia_original.copy()
+                numeri_cols_check = [f'Num{i+1}' for i in range(6)] # 6 numeri per SuperEnalotto
+
+                if not all(col in df_temp_for_alignment.columns for col in numeri_cols_check):
+                    self.log_message_gui("ERRORE (Spia SE): Colonne Numeri (Num1-6) mancanti nel DataFrame per allineamento date.")
+                    self.last_spia_se_singoli = None; self.last_spia_se_ambi = None; self.last_spia_se_terni = None
+                    self.last_spia_se_data_fine_analisi = None
+                    return
+
+                for col in numeri_cols_check:
+                    df_temp_for_alignment[col] = pd.to_numeric(df_temp_for_alignment[col], errors='coerce')
+                
+                df_aligned_with_arr_spia = df_temp_for_alignment.dropna(subset=numeri_cols_check).copy()
+                
+                if len(df_aligned_with_arr_spia) == len(arr_spia_se_main):
+                    if 'Data' in df_aligned_with_arr_spia.columns:
+                        date_arr_spia_se_aligned = df_aligned_with_arr_spia['Data'].values
+                    else:
+                         self.log_message_gui("ATTENZIONE (Spia SE): Colonna 'Data' non trovata nel DataFrame allineato.")
+                else:
+                    self.log_message_gui(f"ATTENZIONE (Spia SE): Disallineamento tra numeri ({len(arr_spia_se_main)}) e date ({len(df_aligned_with_arr_spia)}) dopo pulizia. Il log del periodo potrebbe usare le date di input.")
+            except Exception as e_align:
+                 self.log_message_gui(f"ERRORE (Spia SE): Problema durante allineamento date: {e_align}")
+
+
+            self.log_message_gui("Analisi Spia SE: Inizio calcolo frequenze numeri/ambi/terni spiati...")
+            res_s, res_a, res_t, num_occ, d_ini_scan, d_fin_scan = calcola_numeri_spia_superenalotto(
+                arr_spia_se_main, date_arr_spia_se_aligned, numeri_spia_list, colpi_an, 
+                top_s, top_a, top_t, 
+                self.log_message_gui, stop_event
+            )
+
+            if stop_event.is_set():
+                self.log_message_gui("Analisi Spia SE: Elaborazione terminata a causa di richiesta di stop.")
+                return
+
+            self.log_message_gui("-" * 40 + "\nRISULTATI ANALISI SPIA SUPERENALOTTO (Spia: " + str(self.last_spia_se_numeri_input) + "):" + "-" * 40)
+            
+            periodo_effettivo_usato_inizio = d_ini_scan if d_ini_scan not in [None, "N/A"] else start_date_str
+            periodo_effettivo_usato_fine = d_fin_scan if d_fin_scan not in [None, "N/A"] else end_date_str
+            
+            self.log_message_gui(f"Periodo analizzato: {periodo_effettivo_usato_inizio} - {periodo_effettivo_usato_fine}")
+            self.log_message_gui(f"Occorrenze dei numeri spia (come combinazione) trovate: {num_occ}")
+            self.log_message_gui(f"Analizzati {colpi_an} colpi successivi per ogni occorrenza.")
+
+            if num_occ > 0:
+                self.last_spia_se_singoli = [int(s_val[0]) for s_val in res_s] if res_s else []
+                self.last_spia_se_ambi = [tuple(map(int, a_val[0])) for a_val in res_a] if res_a else []
+                self.last_spia_se_terni = [tuple(map(int, t_val[0])) for t_val in res_t] if res_t else []
+                self.last_spia_se_data_fine_analisi = periodo_effettivo_usato_fine 
+                
+                if res_s:
+                    self.log_message_gui(f"\nTop {len(res_s)} SINGOLI spiati:")
+                    for numero, frequenza in res_s:
+                        self.log_message_gui(f"  - SINGOLO: {int(numero):02d} (Freq: {frequenza})")
+                else:
+                    self.log_message_gui("\nNessun singolo spia SE significativo trovato.")
+                
+                if res_a:
+                    self.log_message_gui(f"\nTop {len(res_a)} AMBI spiati:")
+                    for ambo_tuple, frequenza in res_a:
+                        ambo_str = ", ".join(f"{int(n):02d}" for n in ambo_tuple)
+                        self.log_message_gui(f"  - AMBO: {ambo_str} (Freq: {frequenza})")
+                else:
+                    self.log_message_gui("\nNessun ambo spia SE significativo trovato.")
+
+                if res_t:
+                    self.log_message_gui(f"\nTop {len(res_t)} TERNI spiati:")
+                    for terno_tuple, frequenza in res_t:
+                        terno_str = ", ".join(f"{int(n):02d}" for n in terno_tuple)
+                        self.log_message_gui(f"  - TERNO: {terno_str} (Freq: {frequenza})")
+                else:
+                    self.log_message_gui("\nNessun terno spia SE significativo trovato.")
+                
+                if not res_s and not res_a and not res_t:
+                    self.log_message_gui("\nNessun risultato spia (singolo, ambo o terno) significativo trovato nonostante le occorrenze spia.")
+
+            elif not (stop_event and stop_event.is_set()): 
+                self.log_message_gui(f"Nessuna occorrenza dei numeri spia {self.last_spia_se_numeri_input} trovata nel periodo selezionato.")
+                self.last_spia_se_singoli = None; self.last_spia_se_ambi = None; self.last_spia_se_terni = None
+                self.last_spia_se_data_fine_analisi = None
+           
+        except Exception as e:
+            self.log_message_gui(f"\nERRORE CRITICO durante l'analisi dei Numeri Spia SE: {e}")
+            self.log_message_gui(traceback.format_exc())
+            self.last_spia_se_singoli = None; self.last_spia_se_ambi = None; self.last_spia_se_terni = None
+            self.last_spia_se_data_fine_analisi = None
+        finally:
+            if not (stop_event and stop_event.is_set()) and hasattr(self, 'spia_se_thread') and self.spia_se_thread is not None : 
+                self.log_message_gui("="*15 + " Analisi Numeri Spia SuperEnalotto Completata " + "="*15 + "\n")
+            
+            self.set_controls_state(tk.NORMAL) 
+            self.root.after(10, self._clear_spia_se_thread_ref)
+
+    def _clear_spia_se_thread_ref(self): self.spia_se_thread = None; self._set_controls_state_tk(tk.NORMAL)
+
+    def start_verifica_spia_superenalotto_thread(self):
+        # Simile a start_verifica_spia_thread del 10eLotto, ma usa variabili _se_
+        if any(t and t.is_alive() for t in [self.analysis_thread, self.check_thread, self.spia_se_thread, self.verifica_spia_se_thread]):
+            messagebox.showwarning("Operazione in Corso", "Attendere.", parent=self.root); return
+        if not (self.last_spia_se_singoli or self.last_spia_se_ambi or self.last_spia_se_terni) or not self.last_spia_se_data_fine_analisi:
+            messagebox.showinfo("Nessun Risultato Spia SE", "Eseguire prima Analisi Spia SuperEnalotto.", parent=self.root); return
+        try: num_colpi = int(self.check_spia_se_colpi_var.get()); assert 1 <= num_colpi <= 20
+        except: messagebox.showerror("Errore", "Colpi verifica spia SE non validi (1-20).", parent=self.root); return
+
+        self.set_controls_state(tk.DISABLED)
+        self.log_message_gui(f"\n=== Avvio Verifica Risultati Spia SuperEnalotto ({num_colpi} Colpi) ===")
+        self._stop_event_verifica_spia_se.clear()
+        self.verifica_spia_se_thread = threading.Thread(target=self.run_verifica_spia_superenalotto_results,
+            args=(self.file_path_var.get(), self.last_spia_se_data_fine_analisi, num_colpi, self._stop_event_verifica_spia_se),
+            daemon=True, name="VerificaSpiaSEThread")
+        self.verifica_spia_se_thread.start()
+
+    # All'interno della classe AppSuperEnalotto
+
+    def run_verifica_spia_superenalotto_results(self, data_source, data_fine_an_spia_se, num_colpi_ver, stop_event):
+        try:
+            try:
+                last_date_obj = datetime.strptime(data_fine_an_spia_se, '%Y-%m-%d')
+                check_start_date_obj = last_date_obj + timedelta(days=1)
+                check_start_date_str = check_start_date_obj.strftime('%Y-%m-%d')
+            except ValueError as ve:
+                self.log_message_gui(f"ERRORE formato data fine analisi spia SE '{data_fine_an_spia_se}': {ve}")
+                return
+
+            if stop_event.is_set():
+                self.log_message_gui("Verifica Spia SE: Annullata prima caricamento dati.")
+                return
+
+            self.log_message_gui(f"Verifica Spia SE: Caricamento dati per verifica da {check_start_date_str} in avanti...")
+            df_chk, arr_chk_main, _, _, _ = carica_dati_superenalotto(
+                data_source, 
+                start_date=check_start_date_str, 
+                end_date=None, 
+                log_callback=self.log_message_gui
+            )
+            
+            if stop_event.is_set(): 
+                self.log_message_gui("Verifica Spia SE: Annullata dopo caricamento dati.")
+                return
+            
+            if df_chk is None or df_chk.empty or arr_chk_main is None or len(arr_chk_main) == 0: 
+                self.log_message_gui(f"Verifica Spia SE: Nessuna estrazione trovata dopo {data_fine_an_spia_se} (a partire da {check_start_date_str}) o caricamento fallito.")
+                return
+
+            num_estrazioni_disponibili = len(arr_chk_main)
+            num_colpi_effettivi_verifica = min(num_colpi_ver, num_estrazioni_disponibili)
+            
+            if num_colpi_effettivi_verifica == 0 :
+                 self.log_message_gui(f"Verifica Spia SE: Nessuna estrazione disponibile per la verifica dopo {data_fine_an_spia_se}.")
+                 return
+
+            self.log_message_gui(f"Verifica Spia SE: Trovate {num_estrazioni_disponibili} estrazioni successive. Verifico le prossime {num_colpi_effettivi_verifica}...");
+
+            # Contatori per i successi
+            colpi_con_hit_singoli = 0; max_singoli_indovinati_per_colpo = 0
+            colpi_con_hit_ambi = 0;    max_ambi_indovinati_per_colpo = 0
+            colpi_con_hit_terni = 0;   max_terni_indovinati_per_colpo = 0
+
+            for i in range(num_colpi_effettivi_verifica):
+                if stop_event.is_set():
+                    self.log_message_gui(f"Verifica Spia SE: Interrotta al colpo {i+1}.")
+                    break
+                
+                estrazione_attuale_set = set(arr_chk_main[i])
+                data_estrazione_attuale_str = "N/D"
+                if 'Data' in df_chk.columns and i < len(df_chk) and pd.notna(df_chk.iloc[i]['Data']):
+                    try: data_estrazione_attuale_str = pd.to_datetime(df_chk.iloc[i]['Data']).strftime('%Y-%m-%d')
+                    except Exception: pass
+                
+                log_colpo_header = f"Colpo Spia SE {i+1:02d} ({data_estrazione_attuale_str}):"
+                found_in_this_draw_overall = False
+
+                # Verifica Singoli
+                if self.last_spia_se_singoli:
+                    indovinati_singoli_in_draw = [s for s in self.last_spia_se_singoli if s in estrazione_attuale_set]
+                    if indovinati_singoli_in_draw:
+                        self.log_message_gui(f"{log_colpo_header} SINGOLI: {len(indovinati_singoli_in_draw)}/{len(self.last_spia_se_singoli)} trovati -> {sorted(indovinati_singoli_in_draw)}")
+                        colpi_con_hit_singoli +=1 
+                        max_singoli_indovinati_per_colpo = max(max_singoli_indovinati_per_colpo, len(indovinati_singoli_in_draw))
+                        found_in_this_draw_overall = True
+                
+                # Verifica Ambi
+                if self.last_spia_se_ambi:
+                    indovinati_ambi_in_draw = [tuple(sorted(ambo)) for ambo in self.last_spia_se_ambi if set(ambo).issubset(estrazione_attuale_set)]
+                    if indovinati_ambi_in_draw:
+                        self.log_message_gui(f"{log_colpo_header} AMBI: {len(indovinati_ambi_in_draw)}/{len(self.last_spia_se_ambi)} trovati -> {sorted(indovinati_ambi_in_draw)}")
+                        colpi_con_hit_ambi +=1
+                        max_ambi_indovinati_per_colpo = max(max_ambi_indovinati_per_colpo, len(indovinati_ambi_in_draw))
+                        found_in_this_draw_overall = True
+
+                # Verifica Terni
+                if self.last_spia_se_terni:
+                    indovinati_terni_in_draw = [tuple(sorted(terno)) for terno in self.last_spia_se_terni if set(terno).issubset(estrazione_attuale_set)]
+                    if indovinati_terni_in_draw:
+                        self.log_message_gui(f"{log_colpo_header} TERNI: {len(indovinati_terni_in_draw)}/{len(self.last_spia_se_terni)} trovati -> {sorted(indovinati_terni_in_draw)}")
+                        colpi_con_hit_terni +=1
+                        max_terni_indovinati_per_colpo = max(max_terni_indovinati_per_colpo, len(indovinati_terni_in_draw))
+                        found_in_this_draw_overall = True
+                
+                if not found_in_this_draw_overall: 
+                     self.log_message_gui(f"{log_colpo_header} Nessun risultato spia SE trovato.")
+
+            if not stop_event.is_set(): 
+                self.log_message_gui("-" * 40)
+                self.log_message_gui(f"Verifica Risultati Spia SE ({num_colpi_effettivi_verifica} colpi) Riepilogo:")
+                if self.last_spia_se_singoli:
+                    self.log_message_gui(f"  SINGOLI: Uscite in {colpi_con_hit_singoli} colpi. Max singoli indovinati per colpo: {max_singoli_indovinati_per_colpo} (su {len(self.last_spia_se_singoli)} proposti).")
+                if self.last_spia_se_ambi:
+                    self.log_message_gui(f"  AMBI: Uscite in {colpi_con_hit_ambi} colpi. Max ambi indovinati per colpo: {max_ambi_indovinati_per_colpo} (su {len(self.last_spia_se_ambi)} proposti).")
+                if self.last_spia_se_terni:
+                    self.log_message_gui(f"  TERNI: Uscite in {colpi_con_hit_terni} colpi. Max terni indovinati per colpo: {max_terni_indovinati_per_colpo} (su {len(self.last_spia_se_terni)} proposti).")
+                
+                if not (colpi_con_hit_singoli or colpi_con_hit_ambi or col_con_hit_terni): # Corretto qui
+                    self.log_message_gui("  Nessun risultato spia (singolo, ambo o terno) trovato nei colpi verificati.")
+
+        except Exception as e:
+            self.log_message_gui(f"ERRORE CRITICO durante la verifica dei risultati spia SE: {e}\n{traceback.format_exc()}")
+        finally:
+            if not stop_event.is_set():
+                self.log_message_gui("\n=== Verifica Risultati Spia SuperEnalotto Completata ===")
+            self.set_controls_state(tk.NORMAL)
+            self.root.after(10, self._clear_verifica_spia_se_thread_ref)
+
+    def _clear_verifica_spia_se_thread_ref(self): self.verifica_spia_se_thread = None; self._set_controls_state_tk(tk.NORMAL)
+
+# 4. Modifica on_close
+    def on_close(self):
+        self.log_message_gui("Richiesta chiusura finestra SuperEnalotto...")
+        # Segnala stop a TUTTI i thread
+        self._stop_event_analysis.set()
+        self._stop_event_check.set()
+        self._stop_event_spia_se.set() # NUOVO
+        self._stop_event_verifica_spia_se.set() # NUOVO
+        
+        active_threads = [t for t in [
+            self.analysis_thread, self.check_thread, 
+            self.spia_se_thread, self.verifica_spia_se_thread # NUOVI
+        ] if t and t.is_alive()]
+        
+        # ... (logica di join dei thread e destroy come prima) ...
+        if active_threads:
+            self.log_message_gui(f"Attendo terminazione thread SE: {[t.name for t in active_threads]} (max 3s)")
+            for t in active_threads: t.join(timeout=3.0)
+        
+        if self.root and self.root.winfo_exists(): self.root.destroy()
 
 
     # --- Metodo start_analysis_thread (MODIFICATO per leggere n_cv_splits) ---
