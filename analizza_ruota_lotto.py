@@ -248,12 +248,32 @@ class LottoAnalyzerApp:
         self.info_label_var.set(f"Analisi in corso per la ruota di {ruota.capitalize()}...")
         self.master.update_idletasks() 
 
+        # --- INIZIO MODIFICA ---
+        # Pulisci il Treeview
+        # Rimuovi tutte le righe (items)
+        # Uso *self.tree.get_children() per passare tutti gli item a delete in una volta
+        if self.tree.get_children(): # Controlla se ci sono figli prima di tentare di cancellarli
+            self.tree.delete(*self.tree.get_children())
+
+        # Resetta le colonne. Questa è la parte problematica.
+        # Il traceback indica che self.tree["columns"] = () fallisce.
+        # Tentiamo di usare .configure() che è la chiamata più diretta al backend Tcl/Tk.
+        # Specificare sia columns che displaycolumns a tupla vuota contemporaneamente.
+        try:
+            self.tree.configure(columns=(), displaycolumns=())
+        except tk.TclError as e:
+            # Se questo ancora fallisce, l'errore è persistente.
+            print(f"Errore Tcl durante il reset delle colonne: {e}")
+            messagebox.showerror("Errore Interno Treeview", 
+                                 f"Si è verificato un errore durante l'aggiornamento della tabella:\n{e}\n"
+                                 "Potrebbe essere necessario riavviare l'applicazione.")
+            # Se le colonne non possono essere resettate, è difficile continuare in modo affidabile.
+            return 
+        # --- FINE MODIFICA ---
+
         df_risultati, info_msg, max_ritardi = analizza_ruota_lotto_core(cartella, ruota)
 
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        self.tree["columns"] = () 
-
+        # Il resto del metodo rimane invariato...
         if df_risultati is not None:
             self.info_label_var.set(info_msg if info_msg else "Analisi completata.")
             self.popola_treeview(df_risultati, max_ritardi)
@@ -261,6 +281,7 @@ class LottoAnalyzerApp:
             err_msg = info_msg if info_msg else "Errore sconosciuto durante l'analisi."
             self.info_label_var.set(f"Analisi fallita. {err_msg}") 
             messagebox.showerror("Errore Analisi", err_msg)
+            # Il treeview è già stato resettato (colonne e righe vuote) dal blocco try/except sopra.
 
     def popola_treeview(self, df, max_ritardi_dict):
         if df is None or df.empty:
