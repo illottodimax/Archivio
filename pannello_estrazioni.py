@@ -10,11 +10,21 @@ import pandas as pd
 import traceback
 from tkinter import filedialog, messagebox
 import json
+import sys
+import os
+
+def resource_path(relative_path):
+    """ Ottiene il percorso assoluto della risorsa, funziona sia in sviluppo che con PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 # --- Configurazione ---
 # Percorso dati predefinito (sarà sovrascritto quando l'utente sceglie un percorso)
 DEFAULT_PATH = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pannello_config.json")
+CONFIG_FILE = resource_path("pannello_config.json")
 
 RUOTE_STANDARD = ["BARI", "CAGLIARI", "FIRENZE", "GENOVA", "MILANO",
                   "NAPOLI", "PALERMO", "ROMA", "TORINO", "VENEZIA", "NAZIONALE"]
@@ -41,16 +51,18 @@ TEXT_NAVY = 'navy'           # Blu scuro per status bar
 # --- Funzioni di Gestione Configurazione ---
 # (Invariate)
 def load_config():
-    """Carica la configurazione dal file JSON"""
+    """Carica il percorso dati dal file JSON, se esiste ed è valido."""
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
-                if 'data_path' in config and os.path.exists(config['data_path']):
+                # Restituisce il percorso solo se è presente nel file E se la cartella esiste ancora
+                if 'data_path' in config and os.path.isdir(config['data_path']):
                     return config['data_path']
-    except Exception as e:
-        logging.warning(f"Errore caricamento configurazione: {e}")
-    return DEFAULT_PATH
+    except (IOError, json.JSONDecodeError) as e:
+        logging.warning(f"Errore nel leggere il file di configurazione: {e}")
+    # Se qualcosa va storto o il file/percorso non esiste, non restituire nulla.
+    return None
 
 def save_config(data_path):
     """Salva la configurazione nel file JSON"""
@@ -62,8 +74,6 @@ def save_config(data_path):
         logging.error(f"Errore salvataggio configurazione: {e}")
         return False
 
-# --- Funzioni di Caricamento Dati ---
-# (Invariate - contengono la correzione RN/NZ)
 def _carica_singolo_file_validato(file_path):
     try:
         if not os.path.exists(file_path):
@@ -774,39 +784,55 @@ def create_main_window():
 
     return root
 
-# --- Esecuzione Principale ---
-# (Invariata)
 if __name__ == "__main__":
-    data_path = load_config()
+    # --- Logica di avvio pulita ---
+    
+    # Inizializza le variabili principali
     estrazioni_caricate = {}
     sorted_dates = []
     current_date_index = -1
     root = None
+    
+    # 1. Prova a caricare il percorso dall'ultimo salvataggio
+    data_path = load_config()
+    print(f"Percorso caricato dalla configurazione: {data_path}")
+
+    # 2. Se il percorso è valido, carica i dati. Altrimenti, non fare nulla.
     if data_path and os.path.isdir(data_path):
-        print(f"Percorso dati caricato dalla configurazione: {data_path}")
+        print(f"Percorso valido. Caricamento dati da: {data_path}")
         estrazioni_caricate = mappa_file_ruote_e_carica(data_path)
+        
         if estrazioni_caricate:
             sorted_dates = sorted(estrazioni_caricate.keys())
             current_date_index = len(sorted_dates) - 1
-            print(f"Caricate {len(estrazioni_caricate)} date, {len(sorted_dates)} date uniche ordinate.")
+            print(f"Caricamento riuscito: {len(estrazioni_caricate)} date trovate.")
         else:
-             print(f"Nessun dato valido trovato nel percorso configurato: {data_path}")
+            print(f"Percorso valido, ma nessun dato valido trovato in: {data_path}")
     else:
-        print("Nessun percorso dati valido trovato nella configurazione o percorso non esistente.")
+        print("Nessun percorso dati valido. Il programma si avvierà in attesa della selezione dell'utente.")
         data_path = None
+
+    # 3. Avvia la GUI con gestione degli errori corretta
     try:
         root = create_main_window()
         if root:
             root.mainloop()
         else:
-             messagebox.showerror("Errore Critico", "Impossibile creare la finestra principale (create_main_window ha restituito None).")
+             # Questo è un errore critico, lo gestiamo prima
+             messagebox.showerror("Errore Critico", "Impossibile creare la finestra principale.")
              logging.error("create_main_window() ha restituito None.")
+
     except Exception as e:
-        logging.error(f"Errore imprevisto nell'esecuzione principale della GUI: {e}", exc_info=True)
+        # Errore principale durante l'esecuzione della GUI
+        logging.error(f"Errore imprevisto nella GUI: {e}", exc_info=True)
         try:
-            messagebox.showerror("Errore GUI Imprevisto", f"Si è verificato un errore grave:\n{e}\n\nL'applicazione potrebbe dover essere chiusa.\nControlla i log per dettagli tecnici.")
+            # Tenta di mostrare il messaggio di errore all'utente
+            messagebox.showerror("Errore GUI Imprevisto", f"Si è verificato un errore grave:\n{e}")
         except Exception as msg_err:
+            # Se anche il messagebox fallisce, logga questo secondo errore
             logging.error(f"Impossibile mostrare il messaggio di errore della GUI: {msg_err}")
+
+        # Tenta di chiudere la finestra in modo pulito se esiste ancora
         if root and isinstance(root, tk.Tk) and root.winfo_exists():
             try:
                 root.destroy()

@@ -3276,18 +3276,16 @@ class LottoAnalyzerApp:
     def avvia_backtest_dettagliato_metodo(self):
         self._log_to_gui("\n" + "="*50 + "\nAVVIO BACKTEST DETTAGLIATO METODO\n" + "="*50)
 
-        definizione_per_analisi = None # Questa sarà la definizione del metodo o la definizione fittizia
+        definizione_per_analisi = None
         formula_testuale_display = "N/D"
-        tipo_metodo_usato_per_logica = "Sconosciuto" 
-        tipo_metodo_origine = "Sconosciuto"     
+        tipo_metodo_usato_per_logica = "Sconosciuto"
+        tipo_metodo_origine = "Sconosciuto"
         condizione_primaria_da_passare_all_analisi = None
 
         self._log_to_gui(f"DEBUG Backtest: Inizio. self.metodo_preparato_per_backtest esiste: {self.metodo_preparato_per_backtest is not None}")
         if self.metodo_preparato_per_backtest:
-             self._log_to_gui(f"  self.metodo_preparato_per_backtest['tipo']: {self.metodo_preparato_per_backtest.get('tipo')}")
+            self._log_to_gui(f"  self.metodo_preparato_per_backtest['tipo']: {self.metodo_preparato_per_backtest.get('tipo')}")
 
-
-        # Priorità 1: Metodo esplicitamente preparato da un popup
         if self.metodo_preparato_per_backtest:
             dati_preparati = self.metodo_preparato_per_backtest
             definizione_per_analisi = dati_preparati.get('definizione_strutturata')
@@ -3299,41 +3297,34 @@ class LottoAnalyzerApp:
             self._log_to_gui(f"  Definizione per analisi: {definizione_per_analisi}")
             self._log_to_gui(f"  Condizione primaria: {condizione_primaria_da_passare_all_analisi}")
 
-        # Priorità 2: Ultimo metodo corretto (se checkbox è spuntato)
         elif self.usa_ultimo_corretto_per_backtest_var.get() and self.ultimo_metodo_corretto_trovato_definizione:
-            # ... (la tua logica originale per gestire i metodi corretti,
-            #      assicurati che imposti definizione_per_analisi, formula_testuale_display,
-            #      tipo_metodo_usato_per_logica e condizione_primaria_da_passare_all_analisi) ...
-            # Esempio molto semplificato:
-            scelta_base_per_corretto = self.mc_backtest_choice_var.get()
             tipo_metodo_origine = "Checkbox Metodo Corretto"
             if isinstance(self.ultimo_metodo_corretto_trovato_definizione, dict):
-                chiave_def = 'base1_corretto' if scelta_base_per_corretto == "base1" and 'base1_corretto' in self.ultimo_metodo_corretto_trovato_definizione else \
-                             'base2_corretto' if scelta_base_per_corretto == "base2" and 'base2_corretto' in self.ultimo_metodo_corretto_trovato_definizione else None
-                if not chiave_def and 'base1_corretto' in self.ultimo_metodo_corretto_trovato_definizione: chiave_def = 'base1_corretto' # Fallback
-                elif not chiave_def and 'base2_corretto' in self.ultimo_metodo_corretto_trovato_definizione: chiave_def = 'base2_corretto' # Fallback
+                scelta_base_per_corretto = self.mc_backtest_choice_var.get()
+                chiave_def = f'{scelta_base_per_corretto}_corretto'
+                fallback_chiave = 'base1_corretto' if 'base1_corretto' in self.ultimo_metodo_corretto_trovato_definizione else 'base2_corretto'
 
-                if chiave_def and self.ultimo_metodo_corretto_trovato_definizione.get(chiave_def):
-                    definizione_per_analisi = self.ultimo_metodo_corretto_trovato_definizione[chiave_def]
-                    tipo_metodo_usato_per_logica = "Complesso Corretto (" + chiave_def.replace('_corretto','').title() + ")"
+                definizione_per_analisi = self.ultimo_metodo_corretto_trovato_definizione.get(chiave_def)
+                if not definizione_per_analisi:
+                    definizione_per_analisi = self.ultimo_metodo_corretto_trovato_definizione.get(fallback_chiave)
+                    base_usata = fallback_chiave.replace('_corretto', '')
+                    tipo_metodo_usato_per_logica = f"Complesso Corretto ({base_usata.title()} - Fallback)"
+                else:
+                    base_usata = chiave_def.replace('_corretto', '')
+                    tipo_metodo_usato_per_logica = f"Complesso Corretto ({base_usata.title()})"
+
+                if definizione_per_analisi:
                     formula_testuale_display = "".join(self._format_componente_per_display(comp) for comp in definizione_per_analisi)
-                    # La condizione primaria per un metodo corretto potrebbe essere salvata nel dizionario del metodo corretto stesso
-                    condizione_primaria_da_passare_all_analisi = self.ultimo_metodo_corretto_trovato_definizione.get('condizione_primaria') 
+                    condizione_primaria_da_passare_all_analisi = self.ultimo_metodo_corretto_trovato_definizione.get('condizione_primaria')
                 else:
                     self._log_to_gui("WARN: Impossibile determinare def. metodo corretto da checkbox.")
-            elif isinstance(self.ultimo_metodo_corretto_trovato_definizione, list): # Legacy
+            elif isinstance(self.ultimo_metodo_corretto_trovato_definizione, list):
                 definizione_per_analisi = self.ultimo_metodo_corretto_trovato_definizione
-                tipo_metodo_usato_per_logica = "Complesso Corretto (Legacy)"
+                tipo_metodo_usato_per_logica = "Complesso Corretto (Legacy/Lista)"
                 formula_testuale_display = self.ultimo_metodo_corretto_formula_testuale
             self._log_to_gui(f"INFO: Utilizzo dell'ULTIMO METODO CORRETTO (Tipo: {tipo_metodo_usato_per_logica}): {formula_testuale_display}")
 
-
-        # Priorità 3: Metodo Base definito manualmente
-        elif definizione_per_analisi is None: 
-            # ... (la tua logica originale per i metodi base manuali,
-            #      assicurati che imposti definizione_per_analisi, formula_testuale_display,
-            #      tipo_metodo_usato_per_logica e condizione_primaria_da_passare_all_analisi) ...
-            # Esempio molto semplificato:
+        elif definizione_per_analisi is None:
             scelta_backtest_manuale = self.mc_backtest_choice_var.get()
             tipo_metodo_origine = "Manuale (da Radiobutton)"
             if scelta_backtest_manuale == "base1" and self.definizione_metodo_complesso_attuale and self.definizione_metodo_complesso_attuale[-1]['operazione_successiva'] == '=':
@@ -3347,73 +3338,57 @@ class LottoAnalyzerApp:
                 formula_testuale_display = "".join(self._format_componente_per_display(comp) for comp in definizione_per_analisi)
             self._log_to_gui(f"INFO: Utilizzo del Metodo Base Manuale (Tipo: {tipo_metodo_usato_per_logica}): {formula_testuale_display}")
 
-
-        if definizione_per_analisi is None and tipo_metodo_usato_per_logica == "Sconosciuto": # Controlla dopo tutti i tentativi
+        if definizione_per_analisi is None and tipo_metodo_usato_per_logica == "Sconosciuto":
             messagebox.showerror("Errore Backtest", "Nessun metodo valido selezionato o preparato per il backtest.")
             self._log_to_gui("ERRORE: Nessun metodo valido determinato per il backtest.")
-            self.metodo_preparato_per_backtest = None 
+            self.metodo_preparato_per_backtest = None
             return
         
-        # Controllo finale
-        usa_analizza_performance = False
+        # --- CORREZIONE PRINCIPALE: AGGIUNTA DEI TIPI ALLA LISTA ---
         tipi_validi_per_analisi_dettagliata = [
             "Semplice Analizzato", "complesso_base_analizzato", "complesso_corretto",
-            "Complesso Corretto", "Complesso Corretto (Base 1)", "Complesso Corretto (Base 2)",
+            "Complesso Corretto", "Complesso Corretto (Base1)", "Complesso Corretto (Base2)",
+            "Complesso Corretto (Base 1)", "Complesso Corretto (Base 2)",
             "Complesso Corretto (Base 1 - Fallback)", "Complesso Corretto (Base 2 - Fallback)",
             "Complesso Corretto (Legacy/Lista)", "Complesso Base Manuale (Metodo 1)",
             "Complesso Base Manuale (Metodo 2)", "Condizionato Base", "Condizionato Corretto",
-            "ambata_da_ambo_unico_per_backtest"  # NUOVO TIPO AGGIUNTO
+            "ambata_da_ambo_unico_per_backtest"
         ]
         
         self._log_to_gui(f"DEBUG Backtest: Tipo effettivo per logica di controllo: '{tipo_metodo_usato_per_logica}'")
 
-        if tipo_metodo_usato_per_logica in tipi_validi_per_analisi_dettagliata:
-            if isinstance(definizione_per_analisi, list) and definizione_per_analisi:
-                usa_analizza_performance = True
-            else:
-                messagebox.showerror("Errore Backtest", f"Definizione strutturata del metodo (tipo: {tipo_metodo_usato_per_logica}) è mancante o non valida.")
-                self._log_to_gui(f"ERRORE: Definizione per analisi (lista) è vuota/non valida per tipo '{tipo_metodo_usato_per_logica}'. Valore: {definizione_per_analisi}")
-                self.metodo_preparato_per_backtest = None; return
-        # RIMOSSO l'elif per "ambata_ambo_unico_trasf" perché ora viene gestito da tipi_validi_per_analisi_dettagliata
-        elif tipo_metodo_usato_per_logica == "ambo_sommativo_auto": # Questo è un tipo diverso che avevi
-            # ... (logica per ambo_sommativo_auto come prima, mostra warning e NON chiama analizza_performance_dettagliata_metodo)
-            self.metodo_preparato_per_backtest = None; return 
-        elif tipo_metodo_usato_per_logica.startswith("periodica_"):
-             self._log_to_gui(f"INFO: Il tipo '{tipo_metodo_usato_per_logica}' non usa `analizza_performance_dettagliata_metodo` in questo flusso.")
-             self.metodo_preparato_per_backtest = None; return
-        else: 
+        if tipo_metodo_usato_per_logica not in tipi_validi_per_analisi_dettagliata:
             messagebox.showerror("Errore Backtest", f"Tipo di metodo effettivo '{tipo_metodo_usato_per_logica}' (origine: {tipo_metodo_origine}) non gestito per il backtest.")
             self._log_to_gui(f"ERRORE: Tipo di metodo effettivo non gestito '{tipo_metodo_usato_per_logica}' (origine: {tipo_metodo_origine}). Definizione: {definizione_per_analisi}")
             self.metodo_preparato_per_backtest = None; return
         
-        if not usa_analizza_performance:
-            self._log_to_gui(f"WARN: Backtest non eseguito perché 'usa_analizza_performance' è False per tipo '{tipo_metodo_usato_per_logica}'.")
-            self.metodo_preparato_per_backtest = None # Resetta se non si procede
-            return
+        if not isinstance(definizione_per_analisi, list) or not definizione_per_analisi:
+            messagebox.showerror("Errore Backtest", f"Definizione strutturata del metodo (tipo: {tipo_metodo_usato_per_logica}) è mancante o non valida.")
+            self._log_to_gui(f"ERRORE: Definizione per analisi (lista) è vuota/non valida per tipo '{tipo_metodo_usato_per_logica}'. Valore: {definizione_per_analisi}")
+            self.metodo_preparato_per_backtest = None; return
 
-        # --- Recupero Parametri di Periodo e Gioco ---
         try:
             data_inizio_backtest = self.date_inizio_entry_analisi.get_date()
             data_fine_backtest = self.date_fine_entry_analisi.get_date()
             if data_inizio_backtest > data_fine_backtest: messagebox.showerror("Errore Date", "Data Inizio > Data Fine."); return
         except ValueError: messagebox.showerror("Errore Data", "Date Inizio/Fine non valide."); return
+        
         mesi_sel_gui = [nome for nome, var in self.ap_mesi_vars.items() if var.get()]
         mesi_map_b = {nome: i+1 for i, nome in enumerate(list(self.ap_mesi_vars.keys()))}
         mesi_num_sel_b = []
         if not self.ap_tutti_mesi_var.get() and mesi_sel_gui: mesi_num_sel_b = [mesi_map_b[nome] for nome in mesi_sel_gui]
+        
         ruote_g_b, lookahead_b, indice_mese_da_gui = self._get_parametri_gioco_comuni()
         if ruote_g_b is None: return
-        storico_per_backtest_globale = carica_storico_completo(self.cartella_dati_var.get(), app_logger=self._log_to_gui) 
+        
+        storico_per_backtest_globale = carica_storico_completo(self.cartella_dati_var.get(), app_logger=self._log_to_gui)
         if not storico_per_backtest_globale: messagebox.showerror("Errore Dati", "Impossibile caricare storico per backtest."); return
 
         self.master.config(cursor="watch"); self.master.update_idletasks()
         try:
-            # NOTA: analizza_performance_dettagliata_metodo è la tua funzione originale.
-            # Se vuoi gestire ambi, dovrai chiamare la nuova analizza_performance_dettagliata_ambo
-            # o modificare l'originale. Per ora, usiamo l'originale con la definizione fittizia.
-            risultati_dettagliati_backtest = analizza_performance_dettagliata_metodo( 
+            risultati_dettagliati_backtest = analizza_performance_dettagliata_metodo(
                 storico_completo=storico_per_backtest_globale,
-                definizione_metodo=definizione_per_analisi, # Passa la definizione (fittizia per l'ambo)
+                definizione_metodo=definizione_per_analisi,
                 metodo_stringa_per_log=formula_testuale_display,
                 ruote_gioco=ruote_g_b,
                 lookahead=lookahead_b,
@@ -3425,7 +3400,6 @@ class LottoAnalyzerApp:
                 indice_estrazione_mese_da_considerare=indice_mese_da_gui
             )
             
-            # --- Visualizzazione Risultati ---
             if not risultati_dettagliati_backtest:
                 messagebox.showinfo("Backtest", "Nessuna applicazione o esito per i numeri/metodo selezionato nel periodo.")
             else:
@@ -3433,17 +3407,15 @@ class LottoAnalyzerApp:
                 popup_content += f"Metodo (Tipo: {tipo_metodo_usato_per_logica}, Origine: {tipo_metodo_origine}): {formula_testuale_display}\n"
                 popup_content += f"Periodo: {data_inizio_backtest.strftime('%d/%m/%Y')} - {data_fine_backtest.strftime('%d/%m/%Y')}\n"
                 popup_content += f"Mesi Selezionati: {mesi_num_sel_b or 'Tutti nel range'}\n"
-                # ... (costruzione del popup_content come nella tua versione originale, 
-                #      mostrerà i risultati per la singola ambata testata)
                 successi_ambata_tot = 0; applicazioni_valide_tot = 0; applicazioni_cond_soddisfatte_tot = 0
                 for res_bd in risultati_dettagliati_backtest:
                     popup_content += f"Data Applicazione: {res_bd['data_applicazione'].strftime('%d/%m/%Y')}\n"
-                    cond_soddisfatta_display = res_bd.get('condizione_soddisfatta', True) # Default a True se non c'è condizione
-                    if condizione_primaria_da_passare_all_analisi: # Mostra solo se c'era una condizione
+                    cond_soddisfatta_display = res_bd.get('condizione_soddisfatta', True)
+                    if condizione_primaria_da_passare_all_analisi:
                         popup_content += f"  Condizione Primaria Soddisfatta: {'Sì' if cond_soddisfatta_display else 'No'}\n"
-                    if cond_soddisfatta_display: # Procede solo se la condizione è soddisfatta o non c'è
-                        applicazioni_cond_soddisfatte_tot +=1 # Conta come tentativo se la condizione è ok
-                        if res_bd['metodo_applicabile']: # Il "metodo" qui è la nostra definizione fittizia
+                    if cond_soddisfatta_display:
+                        applicazioni_cond_soddisfatte_tot +=1
+                        if res_bd['metodo_applicabile']:
                             applicazioni_valide_tot += 1
                             popup_content += f"  Ambata Prevista (Testata): {res_bd['ambata_prevista']}\n"
                             if res_bd['esito_ambata']:
@@ -3455,11 +3427,11 @@ class LottoAnalyzerApp:
                             else:
                                 popup_content += f"  ESITO: Ambata non uscita entro {lookahead_b} colpi.\n"
                         else:
-                             popup_content += f"  Metodo (fittizio) non applicabile.\n"
+                             popup_content += f"  Metodo non applicabile.\n"
                     popup_content += "-------------------------\n"
 
                 freq_str = "N/A"
-                if applicazioni_valide_tot > 0: # Basato su quando il metodo fittizio era applicabile
+                if applicazioni_valide_tot > 0:
                     freq_str = f"{(successi_ambata_tot / applicazioni_valide_tot) * 100:.2f}% ({successi_ambata_tot}/{applicazioni_valide_tot} app. valide)"
                 
                 summary = f"\nRIEPILOGO:\n"
@@ -3481,11 +3453,9 @@ class LottoAnalyzerApp:
                 self._log_to_gui(f"INFO: Resetto self.metodo_preparato_per_backtest (era: {self.metodo_preparato_per_backtest.get('formula_testuale', 'N/A')})")
                 self.metodo_preparato_per_backtest = None
                 if hasattr(self, 'mc_listbox_componenti_1') and self.mc_listbox_componenti_1.winfo_exists():
-                    current_listbox_text_line1 = self.mc_listbox_componenti_1.get(0) if self.mc_listbox_componenti_1.size() > 0 else ""
-                    if "PER BACKTEST" in current_listbox_text_line1:
-                        self._refresh_mc_listbox_1()
-                        if not self.definizione_metodo_complesso_attuale:
-                             self.mc_listbox_componenti_1.insert(tk.END, "Nessun metodo base definito.")
+                    self._refresh_mc_listbox_1()
+                    if not self.definizione_metodo_complesso_attuale:
+                         self.mc_listbox_componenti_1.insert(tk.END, "Nessun metodo base definito.")
 
     def _format_componente_per_display(self, componente):
         op_succ = componente['operazione_successiva']; op_str = f" {op_succ} " if op_succ and op_succ != '=' else ""
