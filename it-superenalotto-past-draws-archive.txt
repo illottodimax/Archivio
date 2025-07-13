@@ -1,5 +1,6 @@
 Archivio estrazioni SuperEnalotto
 Data	SERIE							JOLLY	Superstar
+2025-07-12	16	24	25	43	64	78		54	12
 2025-07-11	01	31	40	62	64	74		81	11
 2025-07-10	05	15	20	32	65	75		12	24
 2025-07-08	01	33	40	61	64	73		15	48
