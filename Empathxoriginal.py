@@ -281,88 +281,127 @@ def set_seed(seed_value=42):
 # Impostazione del seed per la riproducibilità
 set_seed()
    
-# --- NUOVA VERSIONE DI carica_dati_grezzi CON FALLBACK AUTOMATICO ---
 def carica_dati_grezzi(ruota):
     """
-    Carica i dati grezzi per una ruota.
-    Tenta prima di scaricarli da GitHub. Se fallisce (es. no internet),
-    prova a caricarli da un file locale presente nella stessa cartella dello script.
+    Carica i dati grezzi da GitHub, gestendo errori e impedendo
+    che "NA" venga interpretato come NaN. Include debug temporaneo.
     """
     file_name = FILE_RUOTE.get(ruota)
     if not file_name:
-        logger.error(f"Sigla ruota '{ruota}' non trovata nel dizionario FILE_RUOTE.")
+        logger.error(f"Abbreviazione ruota non trovata nel dizionario: {ruota}")
         return None
 
-    df = None
+    url = f"{BASE_GITHUB_URL.rstrip('/')}/{file_name}"
+    logger.info(f"Tentativo di caricamento dati per {ruota} da GitHub URL: {url}")
 
-    # --- TENTATIVO 1: Caricamento da GitHub ---
     try:
-        url = f"{BASE_GITHUB_URL.rstrip('/')}/{file_name}"
-        logger.info(f"Tentativo di caricamento dati per {ruota} da GitHub URL: {url}")
-        
         response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        
+        response.raise_for_status() # Controlla errori HTTP (404, 500, etc.)
         content = response.text
-        if content and not content.isspace():
-            # NOTA: Usiamo dtype=str e keep_default_na=False per gestire correttamente la ruota Nazionale ('NA')
-            df = pd.read_csv(io.StringIO(content), header=None, sep=r'\s+', engine='python', dtype=str, keep_default_na=False, na_values=[''])
-            logger.info(f"Dati per {ruota} caricati con successo da GitHub.")
+
+        if not content or content.isspace():
+             logger.warning(f"File scaricato da {url} per {ruota} è vuoto o contiene solo spazi.")
+             return None
+
+        # --- MODIFICA CRUCIALE PER GESTIRE "NA" ---
+        # Usa io.StringIO per leggere la stringa come file
+        df = pd.read_csv(
+            io.StringIO(content),
+            header=None,              # Il file non ha header
+            sep='\t',                 # Separatore è tabulazione
+            encoding='utf-8',         # Specifica encoding
+            dtype={1: str},           # Specifica che la colonna 1 (Ruota) dovrebbe essere stringa
+            keep_default_na=False,    # NON interpretare "NA", "NaN" etc. come valori mancanti
+            na_values=['']            # Considera SOLO le stringhe vuote come valori mancanti (opzionale)
+        )
+        # --- FINE MODIFICA ---
+
+        # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+        # (Puoi commentare o rimuovere queste righe dopo aver verificato che funziona)
+        logger.info(f"DEBUG {ruota}: Info DataFrame DOPO lettura con keep_default_na=False:")
+        df_info_str = io.StringIO()
+        df.info(buf=df_info_str)
+        logger.info(f"DEBUG {ruota}:\n{df_info_str.getvalue()}")
+        # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+        expected_columns = 7 # Data, Ruota, Num1, Num2, Num3, Num4, Num5
+        if df.shape[1] == expected_columns:
+             # Assegna nomi alle colonne
+             df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]
+
+             # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+             logger.info(f"DEBUG {ruota}: Valori unici in df['Ruota'] DOPO rinomina colonne: {df['Ruota'].unique()}")
+             # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+             # Verifica Consistenza Sigla
+             sigle_nel_file = df['Ruota'].unique()
+
+             if sigle_nel_file.size > 0:
+                 # Estrai la prima (e si spera unica) sigla trovata
+                 sigla_letta = sigle_nel_file[0] # Ora DOVREBBE essere la stringa 'NA'
+
+                 # === INIZIO BLOCCO DEBUG TEMPORANEO ===
+                 logger.info(f"DEBUG {ruota}: Valore sigla_letta estratto: {repr(sigla_letta)}") # repr() mostra se è stringa
+                 logger.info(f"DEBUG {ruota}: Tipo sigla_letta estratto: {type(sigla_letta)}")
+                 # === FINE BLOCCO DEBUG TEMPORANEO ===
+
+                 # Confronto sigla (ora dovrebbe funzionare)
+                 if len(sigle_nel_file) == 1 and sigla_letta.upper() != ruota.upper():
+                     logger.warning(f"Sigla nel file {file_name} ('{sigla_letta}') != chiave usata ('{ruota}').")
+                 elif len(sigle_nel_file) > 1:
+                      logger.warning(f"Multiple sigle ruota in {file_name} per {ruota}: {sigle_nel_file}.")
+             else:
+                 logger.warning(f"Nessuna sigla trovata nella colonna 'Ruota' del file {file_name}.")
+
+             logger.info(f"Dati caricati e colonne rinominate per {ruota} da GitHub.")
+             return df # Restituisce il DataFrame caricato e validato
         else:
-            logger.warning(f"File per {ruota} scaricato da GitHub è vuoto. Attivo fallback.")
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"FALLBACK ATTIVATO: Impossibile caricare da GitHub per {ruota}. Errore: {e}. Tento con file locale.")
-    except Exception as e_github:
-        logger.warning(f"FALLBACK ATTIVATO: Errore imprevisto durante caricamento da GitHub per {ruota}: {e_github}. Tento con file locale.")
+             # Errore se il numero di colonne non è quello atteso
+             logger.error(f"Formato colonne inatteso ({df.shape[1]}) in {file_name} da {url}. Attese {expected_columns}.")
+             try:
+                 # Prova a loggare le prime righe per aiutare nel debug
+                 logger.error(f"Prime righe:\n{df.head().to_string()}")
+             except Exception:
+                 logger.error("Impossibile mostrare prime righe.")
+             return None # Fallimento caricamento
 
-    # --- TENTATIVO 2: Caricamento locale (se il primo è fallito) ---
-    if df is None or df.empty:
-        try:
-            if getattr(sys, 'frozen', False):
-                percorso_base = os.path.dirname(sys.executable)
-            else:
-                # Questo blocco gestisce sia lo script .py che il caso in cui il percorso non sia definibile
-                try:
-                    percorso_base = os.path.dirname(os.path.abspath(__file__))
-                except NameError:
-                    percorso_base = os.getcwd()
-
-            percorso_file_locale = os.path.join(percorso_base, file_name)
-            
-            logger.info(f"Tentativo di caricamento dati per {ruota} da file locale: {percorso_file_locale}")
-            if os.path.exists(percorso_file_locale):
-                df = pd.read_csv(percorso_file_locale, header=None, sep=r'\s+', engine='python', dtype=str, keep_default_na=False, na_values=[''])
-                logger.info(f"Dati per {ruota} caricati con successo da file locale.")
-            else:
-                logger.error(f"FALLIMENTO FINALE: File locale non trovato: {percorso_file_locale}")
-                messagebox.showerror("Errore Caricamento Dati", f"Impossibile caricare i dati sia da Internet che da locale.\n\nFile non trovato: {percorso_file_locale}")
-                return None
-        except Exception as e_locale:
-            logger.error(f"FALLIMENTO FINALE: Errore durante caricamento da file locale per {ruota}: {e_locale}")
-            messagebox.showerror("Errore Caricamento Dati", f"Errore imprevisto durante la lettura del file locale:\n{e_locale}")
-            return None
-
-    # --- Elaborazione finale del DataFrame (se caricato) ---
-    if df is None or df.empty:
-        logger.error(f"FALLIMENTO FINALE: Nessun dato valido caricato per {ruota}.")
+    # Gestione delle eccezioni durante il caricamento o parsing
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout (15s) durante connessione a {url} per {ruota}")
         return None
-
-    try:
-        # Il file dovrebbe avere 7 colonne: Data, Ruota, Num1-5
-        if df.shape[1] != 7:
-            logger.error(f"Formato colonne inatteso ({df.shape[1]}) nel file per {ruota}. Attese 7 colonne.")
-            return None
-        
-        df.columns = ['Data', 'Ruota'] + [f'Num{i}' for i in range(1, 6)]
-        
-        sigla_letta = df['Ruota'].iloc[0].upper()
-        if sigla_letta != ruota.upper():
-            logger.warning(f"La sigla nel file ('{sigla_letta}') non corrisponde alla ruota richiesta ('{ruota}').")
-        
-        logger.info(f"Caricamento dati per {ruota} completato.")
-        return df
-    except Exception as e_process:
-        logger.error(f"Errore durante l'elaborazione finale del DataFrame per {ruota}: {e_process}")
+    except requests.exceptions.HTTPError as http_err:
+         logger.error(f"Errore HTTP ({http_err.response.status_code}) da {url} per {ruota}: {http_err}")
+         if http_err.response.status_code == 404:
+             logger.error(f"--> VERIFICA: File '{file_name}' esiste su GitHub all'URL: {url}?")
+         return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Errore di rete/connessione da {url} per {ruota}: {req_err}")
+        return None
+    except pd.errors.EmptyDataError:
+        logger.error(f"Errore Pandas: Nessun dato (EmptyDataError) da {url} per {ruota}.")
+        return None
+    except pd.errors.ParserError as e:
+        logger.error(f"Errore parsing Pandas del TSV da {url} per {ruota}: {e}")
+        try:
+            logger.error(f"Contenuto (prime 500 char):\n{content[:500]}")
+        except NameError: # 'content' potrebbe non essere definito se errore avviene prima
+            logger.error("Contenuto non disponibile.")
+        return None
+    except AttributeError as ae: # Cattura specifica per l'errore originale (ora improbabile)
+        sigla_debug = 'Non disponibile'
+        tipo_debug = 'Non disponibile'
+        # Controlla se le variabili esistono prima di accedervi nel log
+        if 'sigle_nel_file' in locals() and sigle_nel_file.size > 0:
+             sigla_debug = repr(sigle_nel_file[0])
+             tipo_debug = type(sigle_nel_file[0])
+        logger.error(f"!!! AttributeError ANCORA PRESENTE? per {ruota} da {url}.")
+        logger.error(f"Valore (sigla_letta): {sigla_debug}, Tipo: {tipo_debug}")
+        logger.exception(f"Dettagli errore (Traceback): {ae}") # Logga lo stack trace
+        return None
+    except Exception as e:
+        # Cattura qualsiasi altra eccezione imprevista
+        logger.error(f"Errore generico imprevisto caricamento/processamento da {url} per {ruota}:")
+        # Stampa il traceback completo nel log per aiutare a diagnosticare
         logger.error(traceback.format_exc())
         return None
 

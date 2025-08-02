@@ -16,16 +16,6 @@ from collections import Counter, OrderedDict
 import urllib.request
 import urllib.error
 
-# All'inizio del file, dopo gli import
-MESI_ITALIANI = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
-                 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre']
-
-GIORNI_ITALIANI = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
-
-# Aggiungi questo per debug
-print("MESI_ITALIANI:", MESI_ITALIANI)
-print("GIORNI_ITALIANI:", GIORNI_ITALIANI)
-
 try:
     import seaborn as sns
     SEABORN_AVAILABLE = True
@@ -79,9 +69,6 @@ entry_top_n_simpatici = None
 entry_num_estratti_popup = None
 entry_num_ambi_popup = None
 entry_num_terni_popup = None
-entry_num_terni_per_ambo_popup = None
-entry_num_quartine_per_ambo_popup = None
-entry_num_cinquine_per_ambo_popup = None
 
 # Variabili per le checkbox di ottimizzazione
 calcola_ritardo_globale_var = None
@@ -313,12 +300,12 @@ def carica_dati(source, start_date=None, end_date=None):
                     return None
                 lines = response.read().decode('utf-8').splitlines()
         else:
-            if not os.path.exists(source):
+            if not os.path.exists(source): 
                 print(f"File locale non trovato: {source}")
                 return None
             with open(source, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
-
+        
         if not lines: return None
 
         dates, ruote, numeri, seen_rows, fmt_ok = [], [], [], set(), '%Y/%m/%d'
@@ -341,7 +328,7 @@ def carica_dati(source, start_date=None, end_date=None):
             dates.append(data_str)
             ruote.append(ruota_str)
             numeri.append(nums_orig)
-
+        
         if not dates: return None
         df = pd.DataFrame({'Data': dates, 'Ruota': ruote, **{f'Numero{i+1}': [n[i] for n in numeri] for i in range(5)}})
         df['Data'] = pd.to_datetime(df['Data'], format=fmt_ok)
@@ -350,7 +337,7 @@ def carica_dati(source, start_date=None, end_date=None):
         df.dropna(subset=[f'Numero{i+1}' for i in range(5)], how='any', inplace=True)
         df = df.sort_values(by='Data').reset_index(drop=True)
         return df if not df.empty else None
-
+    
     except urllib.error.URLError as e:
         print(f"Errore di rete o URL per {source}: {e}")
         messagebox.showerror("Errore di Rete", f"Impossibile scaricare i dati.\nControlla la connessione internet.\n\nDettagli: {e}")
@@ -370,8 +357,13 @@ def analizza_ruota_verifica(df_verifica, date_eventi_spia_sorted, n_estrazioni, 
     freq_estratti, freq_ambi, freq_terne = Counter(), Counter(), Counter()
     pres_estratti, pres_ambi, pres_terne = Counter(), Counter(), Counter()
 
+    ambo_copertura_eventi_spia = Counter()
     freq_pos_estratti = {}
     pres_pos_estratti = {}
+    
+    # <<< INIZIO MODIFICA: Aggiunta struttura dati per Terni per Ambo >>>
+    terni_per_ambo_frequenza = {} # Chiave: ambo (tuple), Valore: Counter dei terzi numeri
+    # <<< FINE MODIFICA >>>
 
     for data_t in date_eventi_spia_sorted:
         try:
@@ -419,9 +411,22 @@ def analizza_ruota_verifica(df_verifica, date_eventi_spia_sorted, n_estrazioni, 
                         terno_ordinato = tuple(sorted(terno))
                         freq_terne[terno_ordinato] += 1
                         terne_unici_finestra.add(terno_ordinato)
+                        
+                        # <<< INIZIO MODIFICA: Logica per popolare i Terni per Ambo >>>
+                        # Per ogni terno, troviamo i suoi 3 ambi e il terzo numero corrispondente
+                        for ambo_in_terno in itertools.combinations(terno_ordinato, 2):
+                            ambo_in_terno_tuple = tuple(sorted(ambo_in_terno))
+                            terzo_numero = list(set(terno_ordinato) - set(ambo_in_terno_tuple))[0]
+                            
+                            if ambo_in_terno_tuple not in terni_per_ambo_frequenza:
+                                terni_per_ambo_frequenza[ambo_in_terno_tuple] = Counter()
+                            terni_per_ambo_frequenza[ambo_in_terno_tuple][terzo_numero] += 1
+                        # <<< FINE MODIFICA >>>
 
         for num in estratti_unici_finestra: pres_estratti[num] += 1
-        for ambo_u in ambi_unici_finestra: pres_ambi[ambo_u] += 1
+        for ambo_u in ambi_unici_finestra:
+            pres_ambi[ambo_u] += 1
+            ambo_copertura_eventi_spia[ambo_u] +=1
         for terno in terne_unici_finestra: pres_terne[terno] += 1
 
         for num_str, pos_set in estratti_pos_unici_finestra.items():
@@ -435,9 +440,23 @@ def analizza_ruota_verifica(df_verifica, date_eventi_spia_sorted, n_estrazioni, 
                                        ('ambo', freq_ambi, pres_ambi),
                                        ('terno', freq_terne, pres_terne)]:
         if not freq_dict:
-            results[tipo] = None
+            results[tipo] = {'presenza': {'top':pd.Series(dtype=int),'percentuali':pd.Series(dtype=float),'frequenze':pd.Series(dtype=int),'perc_frequenza':pd.Series(dtype=float)},
+                             'frequenza':{'top':pd.Series(dtype=int),'percentuali':pd.Series(dtype=float),'presenze':pd.Series(dtype=int),'perc_presenza':pd.Series(dtype=float)},
+                             'all_percentuali_presenza':pd.Series(dtype=float), 'all_percentuali_frequenza':pd.Series(dtype=float),
+                             'full_presenze':pd.Series(dtype=int), 'full_frequenze':pd.Series(dtype=int)}
+            if tipo == 'estratto':
+                 results[tipo]['posizionale_frequenza'] = {}
+                 results[tipo]['posizionale_presenza'] = {}
+            if tipo == 'ambo':
+                results[tipo]['migliori_per_copertura_eventi_spia'] = {
+                    'items': [],
+                    'totale_eventi_spia': n_eventi_spia
+                }
+                # <<< INIZIO MODIFICA: Aggiunta struttura vuota se non ci sono dati >>>
+                results[tipo]['migliori_terni_per_ambo'] = {}
+                # <<< FINE MODIFICA >>>
             continue
-
+        
         if tipo in ['ambo', 'terno']:
             freq_s = pd.Series({format_ambo_terno(k): v for k, v in freq_dict.items()}, dtype=int).sort_index()
             pres_s = pd.Series({format_ambo_terno(k): v for k, v in pres_dict.items()}, dtype=int)
@@ -469,14 +488,55 @@ def analizza_ruota_verifica(df_verifica, date_eventi_spia_sorted, n_estrazioni, 
             'full_frequenze': freq_s
         }
 
-    if 'estratto' in results and results['estratto'] and freq_pos_estratti:
+    if 'ambo' in results and isinstance(results['ambo'], dict):
+        if n_eventi_spia > 0 and ambo_copertura_eventi_spia:
+            migliori_ambi_copertura_raw = sorted(
+                ambo_copertura_eventi_spia.items(),
+                key=lambda item: (item[1], item[0]),
+                reverse=True
+            )
+            top_ambi_copertura_list = []
+            if migliori_ambi_copertura_raw:
+                top_ambi_copertura_list = [
+                   (format_ambo_terno(ambo_tuple), count)
+                   for ambo_tuple, count in migliori_ambi_copertura_raw
+                ][:3]
+
+            results['ambo']['migliori_per_copertura_eventi_spia'] = {
+                'items': top_ambi_copertura_list,
+                'totale_eventi_spia': n_eventi_spia
+            }
+        else:
+            results['ambo']['migliori_per_copertura_eventi_spia'] = {
+                'items': [],
+                'totale_eventi_spia': n_eventi_spia
+            }
+        
+        # <<< INIZIO MODIFICA: Calcolo e salvataggio dei migliori terni per ambo >>>
+        risultati_terni_per_ambo = {}
+        top_ambi_presenza_per_calcolo = results['ambo'].get('presenza', {}).get('top')
+
+        if top_ambi_presenza_per_calcolo is not None and not top_ambi_presenza_per_calcolo.empty:
+            for ambo_str in top_ambi_presenza_per_calcolo.index:
+                ambo_tuple = tuple(ambo_str.split('-'))
+                if ambo_tuple in terni_per_ambo_frequenza:
+                    # Trova i 3 migliori abbinamenti per questo ambo
+                    top_abbinamenti = terni_per_ambo_frequenza[ambo_tuple].most_common(3)
+                    if top_abbinamenti:
+                        risultati_terni_per_ambo[ambo_str] = top_abbinamenti
+        
+        results['ambo']['migliori_terni_per_ambo'] = risultati_terni_per_ambo
+        # <<< FINE MODIFICA >>>
+
+
+    if 'estratto' in results and freq_pos_estratti:
         results['estratto']['posizionale_frequenza'] = {
             num: dict(sorted(pos_counts.items())) for num, pos_counts in freq_pos_estratti.items()
         }
         results['estratto']['posizionale_presenza'] = {
             num: dict(sorted(pos_counts.items())) for num, pos_counts in pres_pos_estratti.items()
         }
-    elif 'estratto' in results and results['estratto']:
+    elif 'estratto' in results:
         results['estratto']['posizionale_frequenza'] = {}
         results['estratto']['posizionale_presenza'] = {}
 
@@ -485,7 +545,7 @@ def analizza_ruota_verifica(df_verifica, date_eventi_spia_sorted, n_estrazioni, 
 def analizza_antecedenti(df_ruota, numeri_obiettivo, n_precedenti, nome_ruota):
     if df_ruota is None or df_ruota.empty:
         return None, f"Nessun dato disponibile per la ruota {nome_ruota} nel periodo selezionato."
-
+        
     if not numeri_obiettivo or n_precedenti <= 0:
         return None, "Input per l'analisi degli antecedenti non validi (numeri o colpi)."
 
@@ -495,13 +555,13 @@ def analizza_antecedenti(df_ruota, numeri_obiettivo, n_precedenti, nome_ruota):
 
     indices_obiettivo = df_ruota.index[df_ruota[cols_num].isin(numeri_obiettivo_zfill).any(axis=1)].tolist()
     n_occ_obiettivo = len(indices_obiettivo)
-
+    
     if n_occ_obiettivo == 0:
         return None, f"Nessuna occorrenza dei numeri obiettivo trovata sulla ruota {nome_ruota}."
 
     freq_ant, pres_ant = Counter(), Counter()
     actual_base_pres = 0
-
+    
     for idx_obj in indices_obiettivo:
         if idx_obj < n_precedenti:
             continue
@@ -525,7 +585,7 @@ def analizza_antecedenti(df_ruota, numeri_obiettivo, n_precedenti, nome_ruota):
 
     if actual_base_pres == 0:
         return base_res, f"Trovate {n_occ_obiettivo} occorrenze, ma nessuna aveva abbastanza estrazioni precedenti per l'analisi."
-
+    
     if not freq_ant:
         return base_res, "Nessun numero antecedente trovato nelle finestre di analisi."
 
@@ -554,7 +614,7 @@ def analizza_antecedenti(df_ruota, numeri_obiettivo, n_precedenti, nome_ruota):
             'perc_presenza': perc_ant_pres.reindex(top_ant_freq.index).fillna(0.0)
         }
     }
-
+    
     return results_data, None
 
 def aggiorna_risultati_globali(risultati_nuovi, info_ricerca=None, modalita="successivi"):
@@ -607,7 +667,7 @@ def calcola_ritardo_attuale_globale(df_all_wheels, item_to_find, item_type, end_
         return "N/D"
 
     cols_num = ['Numero1', 'Numero2', 'Numero3', 'Numero4', 'Numero5']
-
+    
     hits_df = None
     if item_type == 'estratto':
         condition = (df_period[cols_num] == item_to_find).any(axis=1)
@@ -618,6 +678,12 @@ def calcola_ritardo_attuale_globale(df_all_wheels, item_to_find, item_type, end_
         condition1 = (df_period[cols_num] == n1).any(axis=1)
         condition2 = (df_period[cols_num] == n2).any(axis=1)
         hits_df = df_period[condition1 & condition2]
+    elif item_type == 'terno':
+        n1, n2, n3 = item_to_find
+        condition1 = (df_period[cols_num] == n1).any(axis=1)
+        condition2 = (df_period[cols_num] == n2).any(axis=1)
+        condition3 = (df_period[cols_num] == n3).any(axis=1)
+        hits_df = df_period[condition1 & condition2 & condition3]
     else:
         return "N/D"
 
@@ -667,56 +733,6 @@ def calcola_ritardo_attuale(df_ruota_completa, item_da_cercare, tipo_item, data_
             return ritardo -1
 
     return ritardo
-
-def calcola_copertura_ambo_combinazione(combinazione_tuple, ambi_copertura_dict):
-    """
-    Calcola la copertura totale degli ambi per una data combinazione (terno, quartina, ecc.).
-    Una combinazione copre un evento se almeno uno dei suoi ambi interni è uscito.
-    """
-    if len(combinazione_tuple) < 2:
-        return set()
-
-    # Genera tutti gli ambi interni alla combinazione
-    ambi_interni = itertools.combinations(combinazione_tuple, 2)
-
-    # Unisce tutti i set di date in cui ogni ambo interno è uscito
-    date_coperte = set()
-    for ambo in ambi_interni:
-        date_coperte.update(ambi_copertura_dict.get(tuple(sorted(ambo)), set()))
-
-    return date_coperte
-
-def calcola_ritardo_copertura_ambo(df_ruota_completa, combinazione_tuple, data_fine_analisi):
-    """
-    Calcola il ritardo di una combinazione (terzina, quartina, ecc.)
-    inteso come il numero di estrazioni da cui non esce NESSUNO degli ambi che la compongono.
-    """
-    if df_ruota_completa is None or df_ruota_completa.empty or len(combinazione_tuple) < 2:
-        return "N/D"
-    if not isinstance(data_fine_analisi, pd.Timestamp):
-        data_fine_analisi = pd.Timestamp(data_fine_analisi)
-
-    df_filtrato = df_ruota_completa[df_ruota_completa['Data'] <= data_fine_analisi].sort_values(by='Data', ascending=False)
-    if df_filtrato.empty:
-        return "N/D"
-
-    # Genera tutti gli ambi possibili dalla combinazione
-    ambi_da_cercare = [set(map(str, ambo)) for ambo in itertools.combinations(combinazione_tuple, 2)]
-    colonne_numeri = ['Numero1', 'Numero2', 'Numero3', 'Numero4', 'Numero5']
-    ritardo = 0
-
-    for _, row in df_filtrato.iterrows():
-        numeri_riga_set = {str(row[col]).zfill(2) for col in colonne_numeri if pd.notna(row[col])}
-
-        # Controlla se almeno uno degli ambi è presente
-        trovato = any(ambo_set.issubset(numeri_riga_set) for ambo_set in ambi_da_cercare)
-
-        if trovato:
-            return ritardo  # Ritorna il ritardo al momento del ritrovamento
-
-        ritardo += 1
-
-    return ritardo # Ritorna il ritardo totale se non è mai uscito
 
 def mostra_popup_testo_semplice(titolo, contenuto_testo):
     global root
@@ -778,7 +794,7 @@ def mostra_popup_risultati_spia(info_ricerca, risultati_analisi):
 
     popup = tk.Toplevel(root)
     popup.title("Riepilogo Analisi Numeri Spia")
-    popup.geometry("950x800")
+    popup.geometry("950x800") 
     popup.transient(root)
 
     text_area_popup = scrolledtext.ScrolledText(popup, wrap=tk.WORD, font=("Consolas", 10), state=tk.DISABLED)
@@ -805,118 +821,135 @@ def mostra_popup_risultati_spia(info_ricerca, risultati_analisi):
     popup_content_list.append(f"Periodo: {start_date_str} - {end_date_str}")
     popup_content_list.append(f"Estrazioni Successive Analizzate: {info_ricerca.get('n_estrazioni', 'N/D')}")
     date_eventi_spia = info_ricerca.get('date_eventi_spia_ordinate', [])
-    
-        # --- INIZIO MODIFICA ---
-    # Mostra un messaggio che chiarisce quanti eventi sono stati usati
-    date_eventi_spia = info_ricerca.get('date_eventi_spia_ordinate', [])
-    num_eventi_usati = len(date_eventi_spia)
-    num_eventi_richiesti = info_ricerca.get('num_eventi_richiesti')
-    total_events_found = info_ricerca.get('total_events_found_before_filtering', num_eventi_usati)
+    popup_content_list.append(f"Numero Totale di Eventi Spia: {len(date_eventi_spia)}")
+    popup_content_list.append("-" * 60)
 
-    if num_eventi_richiesti is not None:
-        popup_content_list.append(f"Eventi Spia Analizzati: Ultimi {num_eventi_usati} su {total_events_found} trovati nel periodo.")
+    if not risultati_analisi and not date_eventi_spia:
+        popup_content_list.append("\nNessun evento spia trovato nel periodo e con i criteri specificati.")
+    elif not risultati_analisi and date_eventi_spia :
+        popup_content_list.append("\nNessun risultato dettagliato per le ruote di verifica (controllare selezione ruote o dati).")
     else:
-        popup_content_list.append(f"Numero Totale di Eventi Spia: {num_eventi_usati}")
-    # --- FINE MODIFICA ---
-    
-    # --- INIZIO BLOCCO RISULTATI PER RUOTA ---
-    if risultati_analisi:
-        popup_content_list.append("\n" + "=" * 10 + " ANALISI PER RUOTA DI VERIFICA " + "="*10)
         for nome_ruota_v, _, res_ruota in risultati_analisi:
-            if not res_ruota or not isinstance(res_ruota, dict): continue
-            popup_content_list.append(f"\n--- RISULTATI PER RUOTA: {nome_ruota_v.upper()} ---")
+            if not res_ruota or not isinstance(res_ruota, dict):
+                continue
+            popup_content_list.append(f"\n\n--- RISULTATI PER RUOTA DI VERIFICA: {nome_ruota_v.upper()} ---")
             tot_eventi_spia_analizzati = res_ruota.get('totale_eventi_spia', 0)
             popup_content_list.append(f"(Basato su {tot_eventi_spia_analizzati} eventi spia analizzabili)")
+
             for tipo_esito in ['estratto', 'ambo', 'terno']:
                 dati_esito = res_ruota.get(tipo_esito)
                 if dati_esito:
-                    popup_content_list.append(f"\n  -- {tipo_esito.capitalize()} Successivi (Top per Presenza) --")
+                    popup_content_list.append(f"\n  -- {tipo_esito.capitalize()} Successivi --")
+                    
+                    popup_content_list.append(f"    Top per Presenza:")
                     top_pres_items = dati_esito.get('presenza', {}).get('top')
                     if top_pres_items is not None and not top_pres_items.empty:
                         for item_str, pres_val in top_pres_items.items():
                             perc = dati_esito['presenza']['percentuali'].get(item_str, 0.0)
                             freq = dati_esito['presenza']['frequenze'].get(item_str, 0)
                             
-                            riga = f"    - {item_str}: Pres. {pres_val} su {tot_eventi_spia_analizzati} eventi ({perc:.1f}%) | Freq.Tot: {freq}"
-                            
+                            riga = f"      - {item_str}: Pres. {pres_val} su {tot_eventi_spia_analizzati} eventi ({perc:.1f}%) | Freq.Tot: {freq}"
+
                             if tipo_esito in ['estratto', 'ambo'] and 'ritardi_attuali' in dati_esito:
-                                ritardo_val = dati_esito['ritardi_attuali'].get(item_str, "N/D")
-                                riga += f" | Rit.Att: {ritardo_val}"
-                            
+                                ritardo_val_popup = dati_esito['ritardi_attuali'].get(item_str)
+                                if ritardo_val_popup is not None and ritardo_val_popup not in ["N/A (parse)", "N/A (err)", "N/D (no data full)", "N/D", "N/D (no data)", "N/D (no draws in period)"]:
+                                    riga += f" | Rit.Att: {ritardo_val_popup}"
+                                else:
+                                    riga += f" | Rit.Att: N/D"
+
                             popup_content_list.append(riga)
+                            
+                            if tipo_esito == 'estratto' and 'posizionale_presenza' in dati_esito and item_str in dati_esito['posizionale_presenza']:
+                                pos_data = dati_esito['posizionale_presenza'][item_str]
+                                pos_str_list = [f"P{p}:{c}({(c/pres_val*100):.0f}%)" for p, c in sorted(pos_data.items())]
+                                if pos_str_list: popup_content_list.append(f"        Posizioni (Pres.): {', '.join(pos_str_list)}")
 
-                            if tipo_esito == 'estratto' and 'posizionale_presenza' in dati_esito:
-                                pos_data = dati_esito['posizionale_presenza'].get(item_str)
-                                if pos_data:
-                                    pos_str_list = [f"P{p}:{c}({(c/pres_val*100):.0f}%)" for p, c in pos_data.items()]
-                                    if pos_str_list:
-                                        popup_content_list.append(f"      Posizioni (Pres.): {', '.join(pos_str_list)}")
-                    else: popup_content_list.append("    Nessuno.")
+                            if tipo_esito == 'ambo':
+                                migliori_terni_per_questo_ambo = res_ruota.get('ambo', {}).get('migliori_terni_per_ambo', {}).get(item_str)
+                                if migliori_terni_per_questo_ambo:
+                                    abbinamenti_str_list = [f"{num}({freq}v)" for num, freq in migliori_terni_per_questo_ambo]
+                                    popup_content_list.append(f"        -> Abb. Terno (Freq): {', '.join(abbinamenti_str_list)}")
+                    else:
+                        popup_content_list.append("      Nessuno.")
+                    
+                else:
+                    popup_content_list.append(f"\n  -- {tipo_esito.capitalize()} Successivi: Nessun dato trovato.")
     
-    # --- FINE BLOCCO RISULTATI PER RUOTA ---
-
-
-    # --- INIZIO BLOCCO RISULTATI GLOBALI ---
-    n_eventi_spia_tot = len(date_eventi_spia)
-
-    # Estratti
-    if info_ricerca.get('migliori_estratti_copertura_globale'):
+    migliori_estratti_globali_info = info_ricerca.get('migliori_estratti_copertura_globale')
+    if migliori_estratti_globali_info:
         popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI ESTRATTI PER COPERTURA GLOBALE " + "=" * 10)
-        for item in info_ricerca['migliori_estratti_copertura_globale']:
-            rit_str = f" | Rit.Att: {item['ritardo_attuale']}" if item['ritardo_attuale'] != 'N/C' else ''
-            popup_content_list.append(f"  - Estratto {item['estratto']}: Coperti {item['coperti']} su {item['totali']} eventi ({item['percentuale']:.1f}%)" + rit_str)
+        popup_content_list.append(f"(Uscita su QUALSIASI ruota di verifica dopo ogni evento spia)")
+        for i, estratto_info_popup in enumerate(migliori_estratti_globali_info):
+            rit_glob_str_popup = ""
+            if "ritardo_min_attuale" in estratto_info_popup:
+                rit_val_glob_popup = estratto_info_popup["ritardo_min_attuale"]
+                if rit_val_glob_popup is not None and rit_val_glob_popup not in ["N/A", "N/D", "N/C"] and isinstance(rit_val_glob_popup, (int,float)): rit_glob_str_popup = f" | Rit.Att: {int(rit_val_glob_popup)}"
+                elif rit_val_glob_popup == "N/D": rit_glob_str_popup = f" | Rit.Att: N/D"
+            popup_content_list.append(f"  {i+1}. Estratto {estratto_info_popup['estratto']}: Coperti {estratto_info_popup['coperti']} su {estratto_info_popup['totali']} eventi ({estratto_info_popup['percentuale']:.1f}%){rit_glob_str_popup}")
         if 'summary_estratti_globali' in info_ricerca:
-             summary_info = info_ricerca['summary_estratti_globali']
-             popup_content_list.append(f"\n    RIEPILOGO COMBINATO: Giocando questi {summary_info['giocati']} estratti si coprono {summary_info['coperti']} su {n_eventi_spia_tot} eventi ({summary_info['percentuale']:.1f}%).")
+             popup_content_list.append(info_ricerca['summary_estratti_globali'])
+    elif 'migliori_estratti_copertura_globale' in info_ricerca:
+        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI ESTRATTI PER COPERTURA GLOBALE " + "=" * 10)
+        popup_content_list.append("  Nessun estratto con copertura globale significativa trovato.")
 
-    # Ambi
-    if info_ricerca.get('migliori_ambi_copertura_globale'):
+    migliori_ambi_globali_info = info_ricerca.get('migliori_ambi_copertura_globale')
+    if migliori_ambi_globali_info:
         popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI AMBI PER COPERTURA GLOBALE " + "=" * 10)
-        for item in info_ricerca['migliori_ambi_copertura_globale']:
-            rit_str = f" | Rit.Att: {item['ritardo_attuale']}" if item['ritardo_attuale'] != 'N/C' else ''
-            popup_content_list.append(f"  - Ambo {item['ambo']}: Coperti {item['coperti']} su {item['totali']} eventi ({item['percentuale']:.1f}%)" + rit_str)
+        popup_content_list.append(f"(Uscita su QUALSIASI ruota di verifica dopo ogni evento spia)")
+        for i, ambo_info_popup in enumerate(migliori_ambi_globali_info):
+            rit_glob_str_popup = ""
+            if "ritardo_min_attuale" in ambo_info_popup:
+                rit_val_glob_popup = ambo_info_popup["ritardo_min_attuale"]
+                if rit_val_glob_popup is not None and rit_val_glob_popup not in ["N/A", "N/D", "N/C"] and isinstance(rit_val_glob_popup, (int,float)): rit_glob_str_popup = f" | Rit.Att: {int(rit_val_glob_popup)}"
+                elif rit_val_glob_popup == "N/D": rit_glob_str_popup = f" | Rit.Att: N/D"
+            popup_content_list.append(f"  {i+1}. Ambo {ambo_info_popup['ambo']}: Coperti {ambo_info_popup['coperti']} su {ambo_info_popup['totali']} eventi ({ambo_info_popup['percentuale']:.1f}%){rit_glob_str_popup}")
         if 'summary_ambi_globali' in info_ricerca:
-            summary_info = info_ricerca['summary_ambi_globali']
-            popup_content_list.append(f"\n    RIEPILOGO COMBINATO: Giocando questi {summary_info['giocati']} ambi si coprono {summary_info['coperti']} su {n_eventi_spia_tot} eventi ({summary_info['percentuale']:.1f}%).")
+             popup_content_list.append(info_ricerca['summary_ambi_globali'])
+    elif 'migliori_ambi_copertura_globale' in info_ricerca:
+        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI AMBI PER COPERTURA GLOBALE " + "=" * 10)
+        popup_content_list.append("  Nessun ambo con copertura globale significativa trovato.")
 
-    # Terni
-    if info_ricerca.get('migliori_terni_copertura_globale'):
-        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI TERNI (SECCHI) PER COPERTURA GLOBALE " + "=" * 10)
-        for item in info_ricerca['migliori_terni_copertura_globale']:
-            popup_content_list.append(f"  - Terno {item['terno']}: Coperti {item['coperti']} su {item['totali']} eventi ({item['percentuale']:.1f}%)")
+    migliori_terni_individuali_info_popup = info_ricerca.get('migliori_terni_copertura_globale')
+    if migliori_terni_individuali_info_popup:
+        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI TERNI PER COPERTURA GLOBALE " + "=" * 10)
+        popup_content_list.append(f"(Uscita su QUALSIASI ruota di verifica dopo ogni evento spia)")
+        for i, terno_info_p in enumerate(migliori_terni_individuali_info_popup):
+            rit_glob_str_popup = ""
+            if "ritardo_min_attuale" in terno_info_p:
+                rit_val_glob_popup = terno_info_p["ritardo_min_attuale"]
+                if rit_val_glob_popup is not None and rit_val_glob_popup not in ["N/A", "N/D", "N/C"] and isinstance(rit_val_glob_popup, (int,float)):
+                    rit_glob_str_popup = f" | Rit.Att: {int(rit_val_glob_popup)}"
+                elif rit_val_glob_popup == "N/D":
+                    rit_glob_str_popup = f" | Rit.Att: N/D"
+            popup_content_list.append(f"  {i+1}. Terno {terno_info_p['terno']}: Coperti {terno_info_p['coperti']} su {terno_info_p['totali']} eventi ({terno_info_p['percentuale']:.1f}%){rit_glob_str_popup}")
         if 'summary_terni_globali' in info_ricerca:
-            summary_info = info_ricerca['summary_terni_globali']
-            popup_content_list.append(f"\n    RIEPILOGO COMBINATO: Giocando questi {summary_info['giocati']} terni si coprono {summary_info['coperti']} su {n_eventi_spia_tot} eventi ({summary_info['percentuale']:.1f}%).")
+             popup_content_list.append(info_ricerca['summary_terni_globali'])
+    elif 'migliori_terni_copertura_globale' in info_ricerca:
+        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI TERNI PER COPERTURA GLOBALE " + "=" * 10)
+        popup_content_list.append("  Nessun terno con copertura globale significativa trovato.")
 
-    # Terni per Ambo
-    if info_ricerca.get('migliori_terni_per_ambo_copertura_globale'):
+    migliori_terni_per_ambo_globali_info = info_ricerca.get('migliori_terni_per_ambo_copertura_globale')
+    if migliori_terni_per_ambo_globali_info:
         popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI TERNI PER AMBO A COPERTURA GLOBALE " + "=" * 10)
-        for item in info_ricerca['migliori_terni_per_ambo_copertura_globale']:
-            perc = (item['copertura_ambo'] / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
-            popup_content_list.append(f"  - Terno {format_ambo_terno(item['combinazione'])}: Copre {item['copertura_ambo']} eventi per AMBO ({perc:.1f}%)")
-        if 'summary_terni_per_ambo_globali' in info_ricerca:
-            summary_info = info_ricerca['summary_terni_per_ambo_globali']
-            popup_content_list.append(f"\n    RIEPILOGO COMBINATO: Giocando questi {summary_info['giocati']} terni si ottiene una vincita di AMBO in {summary_info['coperti']} su {n_eventi_spia_tot} eventi ({summary_info['percentuale']:.1f}%).")
-
-    # Quartine per Ambo
-    if info_ricerca.get('migliori_quartine_per_ambo_copertura_globale'):
-        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI QUARTINE PER AMBO A COPERTURA GLOBALE " + "=" * 10)
-        for item in info_ricerca['migliori_quartine_per_ambo_copertura_globale']:
-            perc = (item['copertura_ambo'] / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
-            popup_content_list.append(f"  - Quartina {format_ambo_terno(item['combinazione'])}: Copre {item['copertura_ambo']} eventi per AMBO ({perc:.1f}%)")
-        if 'summary_quartine_per_ambo_globali' in info_ricerca:
-            summary_info = info_ricerca['summary_quartine_per_ambo_globali']
-            popup_content_list.append(f"\n    RIEPILOGO COMBINATO: Giocando queste {summary_info['giocati']} quartine si ottiene una vincita di AMBO in {summary_info['coperti']} su {n_eventi_spia_tot} eventi ({summary_info['percentuale']:.1f}%).")
+        
+        for i, terno_info in enumerate(migliori_terni_per_ambo_globali_info):
+            terno_str = format_ambo_terno(terno_info['terno'])
+            ambo_base_str = format_ambo_terno(terno_info['ambo_base'])
+            count_copertura = terno_info['copertura_per_ambo']
+            n_eventi_spia_tot = len(date_eventi_spia)
+            perc_copertura = (count_copertura / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
             
-    # Cinquine per Ambo
-    if info_ricerca.get('migliori_cinquine_per_ambo_copertura_globale'):
-        popup_content_list.append("\n\n" + "=" * 10 + " MIGLIORI CINQUINE PER AMBO A COPERTURA GLOBALE " + "=" * 10)
-        for item in info_ricerca['migliori_cinquine_per_ambo_copertura_globale']:
-            perc = (item['copertura_ambo'] / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
-            popup_content_list.append(f"  - Cinquina {format_ambo_terno(item['combinazione'])}: Copre {item['copertura_ambo']} eventi per AMBO ({perc:.1f}%)")
-        if 'summary_cinquine_per_ambo_globali' in info_ricerca:
-            summary_info = info_ricerca['summary_cinquine_per_ambo_globali']
-            popup_content_list.append(f"\n    RIEPILOGO COMBINATO: Giocando queste {summary_info['giocati']} cinquine si ottiene una vincita di AMBO in {summary_info['coperti']} su {n_eventi_spia_tot} eventi ({summary_info['percentuale']:.1f}%).")
+            rit_glob_str_popup = ""
+            if "ritardo_min_attuale" in terno_info:
+                rit_val_glob_popup = terno_info["ritardo_min_attuale"]
+                if rit_val_glob_popup is not None and rit_val_glob_popup not in ["N/A", "N/D", "N/C"] and isinstance(rit_val_glob_popup, (int,float)):
+                    rit_glob_str_popup = f" | Rit.Att: {int(rit_val_glob_popup)}"
+                elif rit_val_glob_popup == "N/D":
+                    rit_glob_str_popup = f" | Rit.Att: N/D"
+            popup_content_list.append(f"  {i+1}. Terno {terno_str} (da Ambo base {ambo_base_str}): Copre {count_copertura} eventi per AMBO ({perc_copertura:.1f}%){rit_glob_str_popup}")
+        
+        if 'summary_terni_per_ambo_globali' in info_ricerca:
+             popup_content_list.append(info_ricerca['summary_terni_per_ambo_globali'])
 
     final_popup_text_content = "\n".join(popup_content_list)
     text_area_popup.config(state=tk.NORMAL)
@@ -928,10 +961,15 @@ def mostra_popup_risultati_spia(info_ricerca, risultati_analisi):
     button_frame_popup_spia.pack(fill=tk.X, pady=(5,10), padx=10, side=tk.BOTTOM)
 
     def _salva_popup_spia_content_definitiva():
-        fpath = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("All files", "*.*")], title="Salva Riepilogo Analisi Spia")
+        fpath = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Salva Riepilogo Analisi Spia"
+        )
         if fpath:
             try:
-                with open(fpath, "w", encoding="utf-8") as f: f.write(final_popup_text_content)
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(final_popup_text_content)
                 messagebox.showinfo("Salvataggio OK", f"Riepilogo salvato in:\n{fpath}", parent=popup)
             except Exception as e_save:
                 messagebox.showerror("Errore Salvataggio", f"Impossibile salvare il file:\n{e_save}", parent=popup)
@@ -950,17 +988,12 @@ def mostra_popup_risultati_spia(info_ricerca, risultati_analisi):
 def cerca_numeri(modalita="successivi"):
     global risultati_globali, info_ricerca_globale, URL_RUOTE, file_ruote, risultato_text, root, data_source_var
     global start_date_entry, end_date_entry, listbox_ruote_analisi, listbox_ruote_verifica
-    
-    # Rimuovi tutto il codice del locale da qui
-    
     global entry_numeri_spia, estrazioni_entry_succ, listbox_ruote_analisi_ant
     global entry_numeri_obiettivo, estrazioni_entry_ant, tipo_spia_var_global, combo_posizione_spia
     global MAX_COLPI_GIOCO
     global entry_num_estratti_popup, entry_num_ambi_popup, entry_num_terni_popup, entry_num_terni_per_ambo_popup
-    global entry_num_quartine_per_ambo_popup, entry_num_cinquine_per_ambo_popup
-    global calcola_coperture_var, calcola_ritardi_var
-    global entry_num_eventi_spia
-    
+    global calcola_ritardo_globale_var
+
     if data_source_var.get() == "Locale" and (not mappa_file_ruote() or not file_ruote):
         messagebox.showerror("Errore Cartella", "Modalità 'Locale' selezionata, ma impossibile leggere i file dalla cartella specificata o la cartella non contiene file validi.\nAssicurati che il percorso sia corretto e la cartella contenga file TXT delle ruote.")
         return
@@ -980,6 +1013,7 @@ def cerca_numeri(modalita="successivi"):
         start_ts,end_ts = pd.Timestamp(start_dt),pd.Timestamp(end_dt)
     except Exception as e:
         messagebox.showerror("Input Date",f"Date non valide: {e}")
+        risultato_text.config(state=tk.NORMAL); risultato_text.delete(1.0,tk.END); risultato_text.insert(tk.END,"Errore input date."); risultato_text.config(state=tk.NORMAL)
         return
 
     messaggi_out,ris_graf_loc = [],[]
@@ -987,79 +1021,62 @@ def cerca_numeri(modalita="successivi"):
     is_online = data_source_var.get() == "Online"
 
     if modalita == "successivi":
-        esegui_calcolo_coperture = calcola_coperture_var.get()
-        esegui_calcolo_ritardi = calcola_ritardi_var.get()
+        esegui_calcolo_ritardo_globale = calcola_ritardo_globale_var.get()
 
         try:
             num_estratti_da_mostrare = int(entry_num_estratti_popup.get())
             if not 1 <= num_estratti_da_mostrare <= 20: raise ValueError()
-        except: num_estratti_da_mostrare = 10 
+        except:
+            num_estratti_da_mostrare = 10 
+            messagebox.showwarning("Input non valido", "Numero di estratti non valido. Impostato a 10.", parent=root)
+
         try:
             num_ambi_da_mostrare = int(entry_num_ambi_popup.get())
             if not 1 <= num_ambi_da_mostrare <= 20: raise ValueError()
-        except: num_ambi_da_mostrare = 10
+        except:
+            num_ambi_da_mostrare = 10
+            messagebox.showwarning("Input non valido", "Numero di ambi non valido. Impostato a 10.", parent=root)
+        
         try:
             num_terni_da_mostrare = int(entry_num_terni_popup.get())
             if not 1 <= num_terni_da_mostrare <= 20: raise ValueError()
-        except: num_terni_da_mostrare = 10
+        except:
+            num_terni_da_mostrare = 10
+            messagebox.showwarning("Input non valido", "Numero di terni non valido. Impostato a 10.", parent=root)
+        
         try:
             num_terni_per_ambo_da_mostrare = int(entry_num_terni_per_ambo_popup.get())
             if not 1 <= num_terni_per_ambo_da_mostrare <= 20: raise ValueError()
-        except: num_terni_per_ambo_da_mostrare = 3
-        try:
-            num_quartine_per_ambo_da_mostrare = int(entry_num_quartine_per_ambo_popup.get())
-            if not 1 <= num_quartine_per_ambo_da_mostrare <= 20: raise ValueError()
-        except: num_quartine_per_ambo_da_mostrare = 3
-        try:
-            num_cinquine_per_ambo_da_mostrare = int(entry_num_cinquine_per_ambo_popup.get())
-            if not 1 <= num_cinquine_per_ambo_da_mostrare <= 20: raise ValueError()
-
-        except: num_cinquine_per_ambo_da_mostrare = 3
-
-                # --- INIZIO BLOCCO LOGICO CORRETTO ---
-        num_eventi_da_considerare = None
-        if entry_num_eventi_spia: # Controlla che il widget esista
-            try:
-                val_str = entry_num_eventi_spia.get().strip()
-                if val_str:
-                    num_eventi_da_considerare = int(val_str)
-                    if num_eventi_da_considerare <= 0:
-                        messagebox.showwarning("Input non valido", "Il numero di eventi deve essere positivo.")
-                        num_eventi_da_considerare = None # Resetta se non valido
-            except (ValueError, tk.TclError):
-                messagebox.showwarning("Input non valido", "Inserire un numero intero per gli eventi.")
-                num_eventi_da_considerare = None
-        # --- FINE BLOCCO LOGICO CORRETTO ---
+        except:
+            num_terni_per_ambo_da_mostrare = 3
+            messagebox.showwarning("Input non valido", "Numero di Terni per Ambo non valido. Impostato a 3.", parent=root)
 
         ra_idx,rv_idx = listbox_ruote_analisi.curselection(),listbox_ruote_verifica.curselection()
         if not ra_idx or not rv_idx:
-            messagebox.showwarning("Manca Input","Seleziona Ruote Analisi (Spia) e Ruote Verifica (Esiti)."); return
+            messagebox.showwarning("Manca Input","Seleziona Ruote Analisi (Spia) e Ruote Verifica (Esiti).")
+            risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input mancante.");risultato_text.config(state=tk.NORMAL);return
         nomi_ra,nomi_rv = [listbox_ruote_analisi.get(i) for i in ra_idx],[listbox_ruote_verifica.get(i) for i in rv_idx]
         tipo_spia_scelto = tipo_spia_var_global.get() if tipo_spia_var_global else "estratto"
         numeri_spia_input_raw = [e.get().strip() for e in entry_numeri_spia]
         numeri_spia_input_validi_zfill = [str(int(n_str)).zfill(2) for n_str in numeri_spia_input_raw if n_str.isdigit() and 1 <= int(n_str) <= 90]
         numeri_spia_da_usare = None; spia_display_str = ""; posizione_spia_selezionata = None
         if tipo_spia_scelto == "estratto":
-            if not numeri_spia_input_validi_zfill: messagebox.showwarning("Manca Input","Nessun Numero Spia (Estratto) valido.");return
+            if not numeri_spia_input_validi_zfill: messagebox.showwarning("Manca Input","Nessun Numero Spia (Estratto) valido.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input mancante.");risultato_text.config(state=tk.NORMAL);return
             numeri_spia_da_usare = numeri_spia_input_validi_zfill; spia_display_str = ", ".join(numeri_spia_da_usare)
         elif tipo_spia_scelto == "estratto_posizionale":
-            if not numeri_spia_input_validi_zfill or not numeri_spia_input_raw[0].strip(): messagebox.showwarning("Manca Input","Inserire il primo Numero Spia per l'analisi posizionale.");return
+            if not numeri_spia_input_validi_zfill or not numeri_spia_input_raw[0].strip(): messagebox.showwarning("Manca Input","Inserire il primo Numero Spia per l'analisi posizionale.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input mancante.");risultato_text.config(state=tk.NORMAL);return
             primo_numero_spia = numeri_spia_input_validi_zfill[0]; numeri_spia_da_usare = [primo_numero_spia]; posizione_scelta_str = combo_posizione_spia.get()
             if not posizione_scelta_str or "Qualsiasi" in posizione_scelta_str: tipo_spia_scelto = "estratto"; spia_display_str = primo_numero_spia
             else:
                 try: posizione_spia_selezionata = int(posizione_scelta_str.split("a")[0]); assert 1 <= posizione_spia_selezionata <= 5; spia_display_str = f"{primo_numero_spia} in {posizione_spia_selezionata}a pos."
-                except: messagebox.showerror("Input Invalido",f"Posizione Spia non valida.");return
+                except: messagebox.showerror("Input Invalido",f"Posizione Spia non valida.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input non valido.");risultato_text.config(state=tk.NORMAL);return
         elif tipo_spia_scelto == "ambo":
-            if len(numeri_spia_input_validi_zfill) < 2: messagebox.showwarning("Manca Input","Inserire almeno 2 numeri validi per Ambo Spia.");return
+            if len(numeri_spia_input_validi_zfill) < 2: messagebox.showwarning("Manca Input","Inserire almeno 2 numeri validi per Ambo Spia.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input mancante.");risultato_text.config(state=tk.NORMAL);return
             numeri_spia_da_usare = tuple(sorted(numeri_spia_input_validi_zfill[:2])); spia_display_str = "-".join(numeri_spia_da_usare)
-        else: messagebox.showerror("Errore Interno", f"Tipo spia '{tipo_spia_scelto}' non gestito.");return
-        
-        try: 
-            n_estr=int(estrazioni_entry_succ.get())
-            assert 1 <= n_estr <= MAX_COLPI_GIOCO
-        except: 
-            messagebox.showerror("Input Invalido",f"N. Estrazioni (1-{MAX_COLPI_GIOCO}) non valido.");return
-        
+        else: messagebox.showerror("Errore Interno", f"Tipo spia '{tipo_spia_scelto}' non gestito.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Errore tipo spia.");risultato_text.config(state=tk.NORMAL);return
+        messaggi_out.append(f"Tipo Spia Analizzata: {tipo_spia_scelto.upper().replace('_',' ')} ({spia_display_str})")
+        try: n_estr=int(estrazioni_entry_succ.get()); assert 1 <= n_estr <= MAX_COLPI_GIOCO
+        except: messagebox.showerror("Input Invalido",f"N. Estrazioni (1-{MAX_COLPI_GIOCO}) non valido.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input non valido.");risultato_text.config(state=tk.NORMAL);return
         info_curr={'numeri_spia_input':numeri_spia_da_usare,'tipo_spia_usato': tipo_spia_scelto,'ruote_analisi':nomi_ra,'ruote_verifica':nomi_rv,'n_estrazioni':n_estr,'start_date':start_ts,'end_date':end_ts}
         if posizione_spia_selezionata is not None and tipo_spia_scelto == "estratto_posizionale": info_curr['posizione_spia_input'] = posizione_spia_selezionata
         all_date_eventi_spia=set(); messaggi_out.append("\n--- FASE 1: Ricerca Date Uscita Spia ---")
@@ -1081,59 +1098,94 @@ def cerca_numeri(modalita="successivi"):
 
         if not all_date_eventi_spia:
             messaggi_out.append(f"\nNESSUNA USCITA SPIA TROVATA PER {spia_display_str}.")
-            aggiorna_risultati_globali([],info_curr,modalita="successivi")
+            aggiorna_risultati_globali([],info_curr,modalita=modalita)
+            final_output_no_eventi_spia = "\n".join(messaggi_out)
+            risultato_text.config(state=tk.NORMAL); risultato_text.delete(1.0,tk.END); risultato_text.insert(tk.END,final_output_no_eventi_spia); risultato_text.config(state=tk.NORMAL); risultato_text.see("1.0")
             mostra_popup_risultati_spia(info_ricerca_globale, risultati_globali); return
-        date_eventi_spia_ord=sorted(list(all_date_eventi_spia))
-                 # --- INIZIO BLOCCO FILTRO CORRETTO ---
-        total_events_found_before_filtering = len(date_eventi_spia_ord)
-        info_curr['total_events_found_before_filtering'] = total_events_found_before_filtering
-        info_curr['num_eventi_richiesti'] = num_eventi_da_considerare
-
-        if num_eventi_da_considerare is not None and num_eventi_da_considerare > 0:
-            date_eventi_spia_ord = date_eventi_spia_ord[-num_eventi_da_considerare:]
-        # --- FINE BLOCCO FILTRO CORRETTO ---
-        
-        n_eventi_spia_tot=len(date_eventi_spia_ord)
-        info_curr['date_eventi_spia_ordinate']=date_eventi_spia_ord
-        n_eventi_spia_tot=len(date_eventi_spia_ord)
-        info_curr['date_eventi_spia_ordinate']=date_eventi_spia_ord
+        date_eventi_spia_ord=sorted(list(all_date_eventi_spia)); n_eventi_spia_tot=len(date_eventi_spia_ord)
+        messaggi_out.append(f"\nFASE 1 OK: {n_eventi_spia_tot} date totali per Evento Spia {spia_display_str}."); info_curr['date_eventi_spia_ordinate']=date_eventi_spia_ord
 
         messaggi_out.append("\n--- FASE 2: Analisi Ruote Verifica ---")
         df_cache_completi_per_ritardo = {}
+        num_rv_ok = 0
         
-        if esegui_calcolo_coperture or esegui_calcolo_ritardi:
-            for nome_rv_loop in nomi_rv:
-                if nome_rv_loop not in df_cache_completi_per_ritardo:
-                    source_full = URL_RUOTE.get(nome_rv_loop.upper()) if is_online else file_ruote.get(nome_rv_loop.upper())
-                    df_full = carica_dati(source_full, start_date=None, end_date=None)
-                    if df_full is not None: df_cache_completi_per_ritardo[nome_rv_loop] = df_full
+        for nome_rv_loop in nomi_rv:
+            source_full = URL_RUOTE.get(nome_rv_loop.upper()) if is_online else file_ruote.get(nome_rv_loop.upper())
+            df_full = carica_dati(source_full, start_date=None, end_date=None)
+            if df_full is not None:
+                df_cache_completi_per_ritardo[nome_rv_loop] = df_full
 
         for nome_rv_loop in nomi_rv:
             source_ver = URL_RUOTE.get(nome_rv_loop.upper()) if is_online else file_ruote.get(nome_rv_loop.upper())
-            df_ver_per_analisi_spia = carica_dati(source_ver, start_date=start_ts, end_date=None)
-            if df_ver_per_analisi_spia is None or df_ver_per_analisi_spia.empty: continue
+            df_ver_per_analisi_spia = carica_dati(source_ver, start_date=start_ts, end_date=None) 
+            
+            if df_ver_per_analisi_spia is None or df_ver_per_analisi_spia.empty:
+                 messaggi_out.append(f"[{nome_rv_loop}] No dati Ver. nel periodo per analisi spia."); continue
+                
             res_ver, err_ver = analizza_ruota_verifica(df_ver_per_analisi_spia, date_eventi_spia_ord, n_estr, nome_rv_loop)
-            if err_ver: continue
+            
+            if err_ver: 
+                messaggi_out.append(f"[{nome_rv_loop}] Errore: {err_ver}"); continue
+
             if res_ver:
-                df_storico_ruota_rit = df_cache_completi_per_ritardo.get(nome_rv_loop)
-                if esegui_calcolo_ritardi and df_storico_ruota_rit is not None:
-                    for tipo_ritardo in ['estratto', 'ambo']:
-                        if tipo_ritardo in res_ver and res_ver[tipo_ritardo]:
-                            res_ver[tipo_ritardo]['ritardi_attuali'] = {}
+                for tipo_ritardo in ['estratto', 'ambo', 'terno']:
+                    if tipo_ritardo in res_ver and res_ver[tipo_ritardo]:
+                        res_ver[tipo_ritardo]['ritardi_attuali'] = {}
+                        df_storico_ruota_rit = df_cache_completi_per_ritardo.get(nome_rv_loop)
+                        if df_storico_ruota_rit is not None:
                             items_to_check = set(res_ver[tipo_ritardo]['presenza']['top'].index)
+                            items_to_check.update(set(res_ver[tipo_ritardo]['frequenza']['top'].index))
                             for item_str in items_to_check:
-                                item_tuple = tuple(item_str.split('-')) if tipo_ritardo == 'ambo' else item_str
+                                item_tuple = tuple(item_str.split('-')) if tipo_ritardo in ['ambo', 'terno'] else item_str
                                 ritardo_val = calcola_ritardo_attuale(df_storico_ruota_rit, item_tuple, tipo_ritardo, end_ts)
                                 res_ver[tipo_ritardo]['ritardi_attuali'][item_str] = ritardo_val
+                
                 ris_graf_loc.append((nome_rv_loop, spia_display_str, res_ver))
+                num_rv_ok += 1
+                msg_res_v = f"\n=== Risultati Verifica: {nome_rv_loop} (Base: {res_ver['totale_eventi_spia']} eventi spia) ==="
+                for tipo_s_out in ['estratto', 'ambo', 'terno']:
+                    res_s_out = res_ver.get(tipo_s_out)
+                    if res_s_out:
+                        msg_res_v += f"\n--- {tipo_s_out.capitalize()} Successivi ---\n  Top per Presenza:\n"
+                        if not res_s_out['presenza']['top'].empty:
+                            for i, (item_key, pres) in enumerate(res_s_out['presenza']['top'].items()):
+                                perc_p = res_s_out['presenza']['percentuali'].get(item_key, 0.0)
+                                freq_p = res_s_out['presenza']['frequenze'].get(item_key, 0)
+                                riga_output = f"    {i+1}. {item_key}: Pres. {pres} su {res_ver['totale_eventi_spia']} eventi ({perc_p:.1f}%) | Freq.Tot: {freq_p}"
+                                
+                                ritardo_attuale_val = res_s_out.get('ritardi_attuali', {}).get(item_key)
+                                if ritardo_attuale_val is not None:
+                                    riga_output += f" | Rit.Att: {ritardo_attuale_val}"
+                                
+                                msg_res_v += riga_output + "\n"
+                                
+                                if tipo_s_out == 'ambo':
+                                    migliori_terni_per_questo_ambo = res_s_out.get('migliori_terni_per_ambo', {}).get(item_key)
+                                    if migliori_terni_per_questo_ambo:
+                                        abbinamenti_str_list = [f"{num}({freq}v)" for num, freq in migliori_terni_per_questo_ambo]
+                                        msg_res_v += f"      -> Abb. Terno (Freq): {', '.join(abbinamenti_str_list)}\n"
+                        else:
+                            msg_res_v += "    Nessuno.\n"
+                messaggi_out.append(msg_res_v)
+            messaggi_out.append("- " * 20)
 
-        if esegui_calcolo_coperture and n_eventi_spia_tot > 0:
-            df_completo_concatenato = pd.concat(df_cache_completi_per_ritardo.values()) if esegui_calcolo_ritardi and df_cache_completi_per_ritardo else None
+        # Sezione COPERTURA GLOBALE
+        if n_eventi_spia_tot > 0:
+            df_completo_concatenato = None
+            if esegui_calcolo_ritardo_globale and df_cache_completi_per_ritardo:
+                dfs_to_concat = [df for name, df in df_cache_completi_per_ritardo.items() if name in nomi_rv]
+                if dfs_to_concat:
+                    df_completo_concatenato = pd.concat(dfs_to_concat).drop_duplicates().sort_values('Data')
 
-            estratti_copertura, ambi_copertura, terni_copertura, quartine_copertura, cinquine_copertura = ({} for _ in range(5))
-
+            estratti_copertura = {}
+            ambi_copertura = {}
+            terni_copertura = {}
+            terni_per_ambo_copertura_globale = {} 
+            
             for data_evento in date_eventi_spia_ord:
-                e_usciti, a_usciti, t_usciti, q_usciti, c_usciti = (set() for _ in range(5))
+                estratti_usciti_evento = set()
+                ambi_usciti_evento = set()
+                terni_usciti_evento = set()
                 for nome_rv in nomi_rv:
                     df_ver = df_cache_completi_per_ritardo.get(nome_rv)
                     if df_ver is None: continue
@@ -1142,127 +1194,262 @@ def cerca_numeri(modalita="successivi"):
                     if not df_successive.empty:
                         for _, row in df_successive.iterrows():
                             numeri_riga = sorted([str(row[col]) for col in col_num_nomi if pd.notna(row[col])])
-                            e_usciti.update(numeri_riga)
-                            if len(numeri_riga) >= 2: a_usciti.update(itertools.combinations(numeri_riga, 2))
-                            if len(numeri_riga) >= 3: t_usciti.update(itertools.combinations(numeri_riga, 3))
-                            if len(numeri_riga) >= 4: q_usciti.update(itertools.combinations(numeri_riga, 4))
-                            if len(numeri_riga) >= 5: c_usciti.update(itertools.combinations(numeri_riga, 5))
+                            if len(numeri_riga) >= 1:
+                                estratti_usciti_evento.update(numeri_riga)
+                            if len(numeri_riga) >= 2:
+                                ambi_usciti_evento.update(itertools.combinations(numeri_riga, 2))
+                            if len(numeri_riga) >= 3:
+                                terni_usciti_evento.update(itertools.combinations(numeri_riga, 3))
                 
-                for e in e_usciti: estratti_copertura.setdefault(e, set()).add(data_evento)
-                for a in a_usciti: ambi_copertura.setdefault(a, set()).add(data_evento)
-                for t in t_usciti: terni_copertura.setdefault(t, set()).add(data_evento)
-                for q in q_usciti: quartine_copertura.setdefault(q, set()).add(data_evento)
-                for c in c_usciti: cinquine_copertura.setdefault(c, set()).add(data_evento)
-
-            # ESTRATTI GLOBALI
+                for estratto in estratti_usciti_evento:
+                    estratti_copertura.setdefault(estratto, set()).add(data_evento)
+                for ambo in ambi_usciti_evento:
+                    ambi_copertura.setdefault(ambo, set()).add(data_evento)
+                for terno in terni_usciti_evento:
+                    terni_copertura.setdefault(terno, set()).add(data_evento)
+                    for ambo_in_terno in itertools.combinations(terno, 2):
+                        ambo_tuple = tuple(sorted(ambo_in_terno))
+                        terzo_numero = list(set(terno) - set(ambo_tuple))[0]
+                        terni_per_ambo_copertura_globale.setdefault(ambo_tuple, {}).setdefault(terzo_numero, set()).add(data_evento)
+            
             info_curr['migliori_estratti_copertura_globale'] = []
             if estratti_copertura:
-                conteggio = Counter({e: len(d) for e, d in estratti_copertura.items()})
-                migliori_raw = sorted(conteggio.items(), key=lambda item: (item[1], int(item[0])), reverse=True)[:num_estratti_da_mostrare]
-                for estratto_str, count in migliori_raw:
-                    rit_att = calcola_ritardo_attuale_globale(df_completo_concatenato, estratto_str, "estratto", end_ts) if esegui_calcolo_ritardi else "N/C"
-                    info_curr['migliori_estratti_copertura_globale'].append({"estratto": estratto_str, "coperti": count, "totali": n_eventi_spia_tot, "percentuale": (count/n_eventi_spia_tot*100), "ritardo_attuale": rit_att})
-                eventi_coperti = set().union(*(estratti_copertura.get(e, set()) for e, _ in migliori_raw))
-                info_curr['summary_estratti_globali'] = {'giocati': len(migliori_raw), 'coperti': len(eventi_coperti), 'percentuale': (len(eventi_coperti)/n_eventi_spia_tot*100)}
+                conteggio_copertura_estratti = Counter({e: len(d) for e, d in estratti_copertura.items()})
+                messaggi_out.append("\n\n=== MIGLIORI ESTRATTI PER COPERTURA GLOBALE ===")
+                messaggi_out.append(f"(Su {n_eventi_spia_tot} eventi spia totali, uscite su QUALSIASI ruota di verifica entro {n_estr} colpi)")
+                migliori_estratti_raw = sorted(conteggio_copertura_estratti.items(), key=lambda item: (item[1], item[0]), reverse=True)[:num_estratti_da_mostrare]
+                
+                for i, (estratto_val, count) in enumerate(migliori_estratti_raw):
+                    perc = (count / n_eventi_spia_tot * 100)
+                    rit_att_str = ""
+                    rit_att = "N/C"
+                    if esegui_calcolo_ritardo_globale:
+                        rit_att = calcola_ritardo_attuale_globale(df_completo_concatenato, estratto_val, "estratto", end_ts)
+                        rit_att_str = f" | Rit.Att.Glob: {rit_att}"
+                    messaggi_out.append(f"    {i+1}. Estratto {estratto_val}: Coperti {count} su {n_eventi_spia_tot} eventi ({perc:.1f}%)" + rit_att_str)
+                    info_curr['migliori_estratti_copertura_globale'].append({"estratto": estratto_val, "coperti": count, "totali": n_eventi_spia_tot, "percentuale": perc, "ritardo_min_attuale": rit_att})
 
-            # AMBI GLOBALI
+                date_coperte_combinazione = set()
+                for estratto_val, _ in migliori_estratti_raw:
+                    date_coperte_combinazione.update(estratti_copertura.get(estratto_val, set()))
+                casi_coperti = len(date_coperte_combinazione)
+                perc_combinata = (casi_coperti / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
+                summary_estratti = f"\n    RIEPILOGO COMBINATO: Giocando questi {len(migliori_estratti_raw)} estratti si coprono {casi_coperti} su {n_eventi_spia_tot} eventi ({perc_combinata:.1f}%)."
+                messaggi_out.append(summary_estratti)
+                info_curr['summary_estratti_globali'] = summary_estratti
+
             info_curr['migliori_ambi_copertura_globale'] = []
+            migliori_ambi_raw = []
             if ambi_copertura:
-                conteggio = Counter({a: len(d) for a, d in ambi_copertura.items()})
-                migliori_raw = sorted(conteggio.items(), key=lambda item: (item[1], int(item[0][0]), int(item[0][1])), reverse=True)[:num_ambi_da_mostrare]
-                for ambo_tuple, count in migliori_raw:
-                    rit_att = calcola_ritardo_attuale_globale(df_completo_concatenato, ambo_tuple, "ambo", end_ts) if esegui_calcolo_ritardi else "N/C"
-                    info_curr['migliori_ambi_copertura_globale'].append({"ambo": format_ambo_terno(ambo_tuple), "coperti": count, "totali": n_eventi_spia_tot, "percentuale": (count/n_eventi_spia_tot*100), "ritardo_attuale": rit_att})
-                eventi_coperti = set().union(*(ambi_copertura.get(a, set()) for a, _ in migliori_raw))
-                info_curr['summary_ambi_globali'] = {'giocati': len(migliori_raw), 'coperti': len(eventi_coperti), 'percentuale': (len(eventi_coperti)/n_eventi_spia_tot*100)}
-            
-            # TERNI GLOBALI
+                conteggio_copertura_ambi = Counter({a: len(d) for a, d in ambi_copertura.items()})
+                messaggi_out.append("\n\n=== MIGLIORI AMBI PER COPERTURA GLOBALE ===")
+                messaggi_out.append(f"(Su {n_eventi_spia_tot} eventi spia totali, uscite su QUALSIASI ruota di verifica entro {n_estr} colpi)")
+                migliori_ambi_raw = sorted(conteggio_copertura_ambi.items(), key=lambda item: (item[1], item[0][0], item[0][1]), reverse=True)[:num_ambi_da_mostrare]
+                
+                for i, (ambo_tuple, count) in enumerate(migliori_ambi_raw):
+                    ambo_str = format_ambo_terno(ambo_tuple)
+                    perc = (count / n_eventi_spia_tot * 100)
+                    rit_att_str = ""
+                    rit_att = "N/C"
+                    if esegui_calcolo_ritardo_globale:
+                        rit_att = calcola_ritardo_attuale_globale(df_completo_concatenato, ambo_tuple, "ambo", end_ts)
+                        rit_att_str = f" | Rit.Att.Glob: {rit_att}"
+                    messaggi_out.append(f"    {i+1}. Ambo {ambo_str}: Coperti {count} su {n_eventi_spia_tot} eventi ({perc:.1f}%)" + rit_att_str)
+                    info_curr['migliori_ambi_copertura_globale'].append({"ambo": ambo_str, "coperti": count, "totali": n_eventi_spia_tot, "percentuale": perc, "ritardo_min_attuale": rit_att})
+
+                date_coperte_combinazione = set()
+                for ambo_tuple, _ in migliori_ambi_raw:
+                    date_coperte_combinazione.update(ambi_copertura.get(ambo_tuple, set()))
+                casi_coperti = len(date_coperte_combinazione)
+                perc_combinata = (casi_coperti / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
+                summary_ambi = f"\n    RIEPILOGO COMBINATO: Giocando questi {len(migliori_ambi_raw)} ambi si coprono {casi_coperti} su {n_eventi_spia_tot} eventi ({perc_combinata:.1f}%)."
+                messaggi_out.append(summary_ambi)
+                info_curr['summary_ambi_globali'] = summary_ambi
+
             info_curr['migliori_terni_copertura_globale'] = []
             if terni_copertura:
-                conteggio = Counter({t: len(d) for t, d in terni_copertura.items()})
-                migliori_raw = sorted(conteggio.items(), key=lambda item: (item[1], int(item[0][0])), reverse=True)[:num_terni_da_mostrare]
-                for terno_tuple, count in migliori_raw:
-                    info_curr['migliori_terni_copertura_globale'].append({"terno": format_ambo_terno(terno_tuple), "coperti": count, "totali": n_eventi_spia_tot, "percentuale": (count/n_eventi_spia_tot*100)})
-                eventi_coperti = set().union(*(terni_copertura.get(t, set()) for t, _ in migliori_raw))
-                info_curr['summary_terni_globali'] = {'giocati': len(migliori_raw), 'coperti': len(eventi_coperti), 'percentuale': (len(eventi_coperti)/n_eventi_spia_tot*100)}
-            
-            # TERNI PER AMBO
-            info_curr['migliori_terni_per_ambo_copertura_globale'] = []
-            if terni_copertura:
-                lista = [{'combinazione': t, 'copertura_ambo': len(calcola_copertura_ambo_combinazione(t, ambi_copertura))} for t in terni_copertura.keys()]
-                top_items_unique = sorted(lista, key=lambda x: x['copertura_ambo'], reverse=True)[:num_terni_per_ambo_da_mostrare]
-                info_curr['migliori_terni_per_ambo_copertura_globale'] = top_items_unique
-                eventi_coperti = set().union(*(calcola_copertura_ambo_combinazione(i['combinazione'], ambi_copertura) for i in top_items_unique))
-                info_curr['summary_terni_per_ambo_globali'] = {'giocati': len(top_items_unique), 'coperti': len(eventi_coperti), 'percentuale': (len(eventi_coperti)/n_eventi_spia_tot*100)}
+                conteggio_copertura_terni = Counter({t: len(d) for t, d in terni_copertura.items()})
+                messaggi_out.append("\n\n=== MIGLIORI TERNI PER COPERTURA GLOBALE ===")
+                messaggi_out.append(f"(Uscita su QUALSIASI ruota di verifica dopo ogni evento spia)")
+                migliori_terni_raw = sorted(conteggio_copertura_terni.items(), key=lambda item: (item[1], item[0][0], item[0][1], item[0][2]), reverse=True)[:num_terni_da_mostrare]
+                
+                for i, (terno_tuple, count) in enumerate(migliori_terni_raw):
+                    terno_str = format_ambo_terno(terno_tuple)
+                    perc = (count / n_eventi_spia_tot * 100)
+                    rit_att_str = ""
+                    rit_att = "N/C"
+                    if esegui_calcolo_ritardo_globale:
+                        rit_att = calcola_ritardo_attuale_globale(df_completo_concatenato, terno_tuple, "terno", end_ts)
+                        rit_att_str = f" | Rit.Att.Glob: {rit_att}"
+                    messaggi_out.append(f"    {i+1}. Terno {terno_str}: Coperti {count} su {n_eventi_spia_tot} eventi ({perc:.1f}%)" + rit_att_str)
+                    info_curr['migliori_terni_copertura_globale'].append({"terno": terno_str, "coperti": count, "totali": n_eventi_spia_tot, "percentuale": perc, "ritardo_min_attuale": rit_att})
 
-            # QUARTINE PER AMBO
-            info_curr['migliori_quartine_per_ambo_copertura_globale'] = []
-            if quartine_copertura:
-                lista = [{'combinazione': q, 'copertura_ambo': len(calcola_copertura_ambo_combinazione(q, ambi_copertura))} for q in quartine_copertura.keys()]
-                top_items_unique = sorted(lista, key=lambda x: x['copertura_ambo'], reverse=True)[:num_quartine_per_ambo_da_mostrare]
-                info_curr['migliori_quartine_per_ambo_copertura_globale'] = top_items_unique
-                eventi_coperti = set().union(*(calcola_copertura_ambo_combinazione(i['combinazione'], ambi_copertura) for i in top_items_unique))
-                info_curr['summary_quartine_per_ambo_globali'] = {'giocati': len(top_items_unique), 'coperti': len(eventi_coperti), 'percentuale': (len(eventi_coperti)/n_eventi_spia_tot*100)}
-            
-            # CINQUINE PER AMBO
-            info_curr['migliori_cinquine_per_ambo_copertura_globale'] = []
-            if cinquine_copertura:
-                lista = [{'combinazione': c, 'copertura_ambo': len(calcola_copertura_ambo_combinazione(c, ambi_copertura))} for c in cinquine_copertura.keys()]
-                top_items_unique = sorted(lista, key=lambda x: x['copertura_ambo'], reverse=True)[:num_cinquine_per_ambo_da_mostrare]
-                info_curr['migliori_cinquine_per_ambo_copertura_globale'] = top_items_unique
-                eventi_coperti = set().union(*(calcola_copertura_ambo_combinazione(i['combinazione'], ambi_copertura) for i in top_items_unique))
-                info_curr['summary_cinquine_per_ambo_globali'] = {'giocati': len(top_items_unique), 'coperti': len(eventi_coperti), 'percentuale': (len(eventi_coperti)/n_eventi_spia_tot*100)}
-        
+                date_coperte_combinazione = set()
+                for terno_tuple, _ in migliori_terni_raw:
+                    date_coperte_combinazione.update(terni_copertura.get(terno_tuple, set()))
+                casi_coperti = len(date_coperte_combinazione)
+                perc_combinata = (casi_coperti / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
+                summary_terni = f"\n    RIEPILOGO COMBINATO: Giocando questi {len(migliori_terni_raw)} terni si coprono {casi_coperti} su {n_eventi_spia_tot} eventi ({perc_combinata:.1f}%)."
+                messaggi_out.append(summary_terni)
+                info_curr['summary_terni_globali'] = summary_terni
+
+            info_curr['migliori_terni_per_ambo_copertura_globale'] = []
+            if migliori_ambi_raw and terni_per_ambo_copertura_globale:
+                messaggi_out.append("\n\n=== MIGLIORI TERNI PER AMBO A COPERTURA GLOBALE ===")
+                
+                lista_candidati_tpa_globale = []
+                for ambo_tuple, _ in migliori_ambi_raw:
+                    abbinamenti_per_ambo = terni_per_ambo_copertura_globale.get(ambo_tuple, {})
+                    for num_abb, _ in abbinamenti_per_ambo.items():
+                        terno_completo_tuple = tuple(sorted(ambo_tuple + (num_abb,)))
+                        
+                        ambate_costituenti = list(itertools.combinations(terno_completo_tuple, 2))
+                        copertura_ambo_del_terno = set()
+                        for ambo_costituente in ambate_costituenti:
+                            copertura_ambo_del_terno.update(ambi_copertura.get(ambo_costituente, set()))
+                        
+                        count_ambo_del_terno = len(copertura_ambo_del_terno)
+                        
+                        lista_candidati_tpa_globale.append({
+                            'copertura_per_ambo': count_ambo_del_terno,
+                            'terno': terno_completo_tuple,
+                            'ambo_base': ambo_tuple
+                        })
+
+                df_candidati = pd.DataFrame(lista_candidati_tpa_globale)
+                if not df_candidati.empty:
+                    df_candidati['terno_str'] = df_candidati['terno'].apply(lambda x: '-'.join(x))
+                    df_candidati = df_candidati.sort_values('copertura_per_ambo', ascending=False)
+                    df_candidati = df_candidati.drop_duplicates(subset='terno_str', keep='first')
+
+                    top_terni_per_ambo = df_candidati.head(num_terni_per_ambo_da_mostrare).to_dict('records')
+
+                    for i, terno_info in enumerate(top_terni_per_ambo):
+                        terno_tuple = terno_info['terno']
+                        terno_str = format_ambo_terno(terno_info['terno'])
+                        ambo_base_str = format_ambo_terno(terno_info['ambo_base'])
+                        count_copertura = terno_info['copertura_per_ambo']
+                        perc_copertura = (count_copertura / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
+                        
+                        rit_att_str = ""
+                        rit_att = "N/C"
+                        if esegui_calcolo_ritardo_globale:
+                            # <<< INIZIO MODIFICA LOGICA RITARDO >>>
+                            # Calcola il ritardo per ciascun ambo componente del terno
+                            component_ambi = list(itertools.combinations(terno_tuple, 2))
+                            ritardi_componenti = []
+                            for ambo_comp in component_ambi:
+                                ritardo_componente = calcola_ritardo_attuale_globale(df_completo_concatenato, ambo_comp, "ambo", end_ts)
+                                if isinstance(ritardo_componente, int):
+                                    ritardi_componenti.append(ritardo_componente)
+                            
+                            # Il ritardo corretto è il minimo tra i ritardi degli ambi componenti
+                            if ritardi_componenti:
+                                rit_att = min(ritardi_componenti)
+                                rit_att_str = f" | Rit.Att.Glob: {rit_att}"
+                            else:
+                                rit_att = "N/D"
+                                rit_att_str = f" | Rit.Att.Glob: {rit_att}"
+                            # <<< FINE MODIFICA LOGICA RITARDO >>>
+
+                        messaggi_out.append(f"  {i+1}. Terno {terno_str} (da Ambo base {ambo_base_str}): Copre {count_copertura} eventi per AMBO ({perc_copertura:.1f}%)" + rit_att_str)
+                        terno_info['ritardo_min_attuale'] = rit_att
+                    
+                    info_curr['migliori_terni_per_ambo_copertura_globale'] = top_terni_per_ambo
+
+                    terni_suggeriti_set = {item['terno'] for item in top_terni_per_ambo}
+                    
+                    date_coperte_combinazione_tpa = set()
+                    for terno_tuple in terni_suggeriti_set:
+                        ambate_costituenti = list(itertools.combinations(terno_tuple, 2))
+                        for ambo_costituente in ambate_costituenti:
+                             date_coperte_combinazione_tpa.update(ambi_copertura.get(ambo_costituente, set()))
+                    
+                    casi_coperti_tpa = len(date_coperte_combinazione_tpa)
+                    perc_combinata_tpa = (casi_coperti_tpa / n_eventi_spia_tot * 100) if n_eventi_spia_tot > 0 else 0
+                    summary_tpa = f"\n    RIEPILOGO COMBINATO: Giocando questi {len(top_terni_per_ambo)} terni si ottiene una vincita di AMBO in {casi_coperti_tpa} su {n_eventi_spia_tot} eventi ({perc_combinata_tpa:.1f}%)."
+                    messaggi_out.append(summary_tpa)
+                    info_curr['summary_terni_per_ambo_globali'] = summary_tpa
+
+        elif num_rv_ok == 0: 
+            messaggi_out.append("\nNessuna Ruota Verifica valida con risultati.")
+
         aggiorna_risultati_globali(ris_graf_loc,info_curr,modalita="successivi")
-        mostra_popup_risultati_spia(info_curr, ris_graf_loc)
+        if ris_graf_loc or (not all_date_eventi_spia and tipo_spia_scelto):
+            mostra_popup_risultati_spia(info_ricerca_globale, risultati_globali)
 
     elif modalita == "antecedenti":
-        # ... (Questa parte rimane invariata rispetto alla tua versione)
         ra_ant_idx=listbox_ruote_analisi_ant.curselection()
         if not ra_ant_idx:
-            messagebox.showwarning("Manca Input","Seleziona Ruota/e Analisi."); return
+            messagebox.showwarning("Manca Input","Seleziona Ruota/e Analisi.")
+            risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input mancante.");risultato_text.config(state=tk.NORMAL)
+            return
+            
         nomi_ra_ant=[listbox_ruote_analisi_ant.get(i) for i in ra_ant_idx]
         num_obj_raw = [e.get().strip() for e in entry_numeri_obiettivo if e.get().strip() and e.get().strip().isdigit() and 1<=int(e.get().strip())<=90]
         num_obj = sorted(list(set(str(int(n)).zfill(2) for n in num_obj_raw)))
+        
         if not num_obj:
-            messagebox.showwarning("Manca Input","Nessun Numero Obiettivo (1-90) valido inserito."); return
+            messagebox.showwarning("Manca Input","Nessun Numero Obiettivo (1-90) valido inserito.")
+            risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input mancante: Inserire almeno un Numero Obiettivo valido.");risultato_text.config(state=tk.NORMAL)
+            return
+            
         try:
-            n_prec=int(estrazioni_entry_ant.get()); assert n_prec >=1
+            n_prec=int(estrazioni_entry_ant.get())
+            assert n_prec >=1
         except:
-            messagebox.showerror("Input Invalido","N. Estrazioni Precedenti (>=1) non valido."); return
+            messagebox.showerror("Input Invalido","N. Estrazioni Precedenti (>=1) non valido.")
+            risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END,"Input non valido: N. Estrazioni Precedenti.");risultato_text.config(state=tk.NORMAL)
+            return
+            
         messaggi_out.append(f"--- Analisi Antecedenti (Marker) ---")
         messaggi_out.append(f"Numeri Obiettivo: {', '.join(num_obj)}")
         messaggi_out.append(f"Numero Estrazioni Precedenti Controllate: {n_prec}")
         messaggi_out.append(f"Periodo: {start_ts.strftime('%d/%m/%Y')} - {end_ts.strftime('%d/%m/%Y')}")
         messaggi_out.append("-" * 40)
-        df_cache_ant={}; almeno_un_risultato_significativo = False
+        
+        df_cache_ant={}
+        almeno_un_risultato_significativo = False
+        
         for nome_ra_ant_loop in nomi_ra_ant:
             df_ant_full = df_cache_ant.get(nome_ra_ant_loop)
             if df_ant_full is None: 
                 source_ant = URL_RUOTE.get(nome_ra_ant_loop.upper()) if is_online else file_ruote.get(nome_ra_ant_loop.upper())
                 df_ant_full=carica_dati(source_ant,start_ts,end_ts)
                 df_cache_ant[nome_ra_ant_loop]=df_ant_full
+            
             if df_ant_full is None or df_ant_full.empty:
-                messaggi_out.append(f"\n[{nome_ra_ant_loop.upper()}] Nessun dato storico trovato per il periodo selezionato."); continue
+                messaggi_out.append(f"\n[{nome_ra_ant_loop.upper()}] Nessun dato storico trovato per il periodo selezionato.")
+                continue
+                
             res_ant, err_ant = analizza_antecedenti(df_ruota=df_ant_full, numeri_obiettivo=num_obj, n_precedenti=n_prec, nome_ruota=nome_ra_ant_loop)
+            
             if res_ant is None and err_ant:
-                messaggi_out.append(f"\n[{nome_ra_ant_loop.upper()}] Errore: {err_ant}"); continue
+                messaggi_out.append(f"\n[{nome_ra_ant_loop.upper()}] Errore: {err_ant}")
+                continue
+
             if res_ant:
                 if err_ant:
                      messaggi_out.append(f"\n[{nome_ra_ant_loop.upper()}] Info: {err_ant}")
-                elif res_ant.get('presenza') and not res_ant['presenza']['top'].empty:
+                elif ((res_ant.get('presenza') and not res_ant['presenza']['top'].empty) or (res_ant.get('frequenza') and not res_ant['frequenza']['top'].empty)):
                     almeno_un_risultato_significativo = True
                     msg_res_ant=f"\n=== Risultati Antecedenti per Ruota: {nome_ra_ant_loop.upper()} ==="
                     msg_res_ant+=f"\n(Obiettivi: {', '.join(res_ant['numeri_obiettivo'])} | Estrazioni Prec.: {res_ant['n_precedenti']} | Occorrenze Obiettivo: {res_ant['totale_occorrenze_obiettivo']})"
-                    msg_res_ant+=f"\n  Top Antecedenti per Presenza (su {res_ant['base_presenza_antecedenti']} casi validi):"
-                    for i,(num,pres) in enumerate(res_ant['presenza']['top'].head(10).items()):
-                        perc_pres_val = res_ant['presenza']['percentuali'].get(num,0.0); freq_val = res_ant['presenza']['frequenze'].get(num,0); 
-                        msg_res_ant+=f"\n    {i+1}. {num}: {pres} ({perc_pres_val:.1f}%) [Freq.Tot: {freq_val}]"
+                    if res_ant.get('presenza') and not res_ant['presenza']['top'].empty:
+                        msg_res_ant+=f"\n  Top Antecedenti per Presenza (su {res_ant['base_presenza_antecedenti']} casi validi):"
+                        for i,(num,pres) in enumerate(res_ant['presenza']['top'].head(10).items()):
+                            perc_pres_val = res_ant['presenza']['percentuali'].get(num,0.0); freq_val = res_ant['presenza']['frequenze'].get(num,0); 
+                            msg_res_ant+=f"\n    {i+1}. {num}: {pres} ({perc_pres_val:.1f}%) [Freq.Tot: {freq_val}]"
+                    else: msg_res_ant+="\n  Nessun Top per Presenza."
+                    
                     messaggi_out.append(msg_res_ant)
                 else:
                     messaggi_out.append(f"\n[{nome_ra_ant_loop.upper()}] Nessun dato antecedente significativo trovato per i numeri obiettivo specificati.")
+            
             messaggi_out.append("\n" + ("- "*20))
+            
         aggiorna_risultati_globali([],{},modalita="antecedenti")
+        
         if not almeno_un_risultato_significativo and any("Nessun dato" in m or "Errore" in m or "Info" in m for m in messaggi_out):
              pass
         elif not almeno_un_risultato_significativo:
@@ -1359,12 +1546,12 @@ def verifica_esiti_utente_su_eventi_spia(date_eventi_spia, combinazioni_utente, 
                             total_actual_hits_for_item += 1
                             dettagli_uscita_per_questo_evento_spia_lista.append(f"{nome_rv} al colpo {colpo_idx} (data esito {data_estrazione_corrente.strftime('%d/%m')})")
                             evento_spia_coperto_in_questo_ciclo_per_item = True
-
+                            
                             if nome_rv not in ruote_con_hit_gia_contate_per_questo_evento_spia:
                                sfaldamenti_totali_per_item_ruota[item_str_key][nome_rv] += 1
                                ruote_con_hit_gia_contate_per_questo_evento_spia.add(nome_rv)
-                            break
-
+                            break 
+            
             esito_per_questo_evento_spia_str = ""
             if evento_spia_coperto_in_questo_ciclo_per_item:
                 esito_per_questo_evento_spia_str = "; ".join(dettagli_uscita_per_questo_evento_spia_lista)
@@ -1373,13 +1560,13 @@ def verifica_esiti_utente_su_eventi_spia(date_eventi_spia, combinazioni_utente, 
                 esito_per_questo_evento_spia_str = f"IN CORSO (max {max_colpi_effettivi_per_evento_spia}/{n_verifiche} colpi analizzabili)"
             else:
                 esito_per_questo_evento_spia_str = "NON USCITO"
-
+            
             esiti_dettagliati_per_item[item_str_key].append(f"    Evento Spia del {data_t.strftime('%d/%m/%y')}: {esito_per_questo_evento_spia_str}")
 
         out.append(f"\n--- Esiti {tipo_sorte_item.upper()} ---");
         out.append(f"  - {item_str_key}:");
         out.extend(esiti_dettagliati_per_item[item_str_key])
-
+        
         out.append(f"\n    RIEPILOGO SFALDAMENTI SU RUOTA per {item_str_key.upper()}:")
         if not ruote_valide:
              out.append("      Nessuna ruota di verifica attiva.")
@@ -1387,9 +1574,12 @@ def verifica_esiti_utente_su_eventi_spia(date_eventi_spia, combinazioni_utente, 
             for nome_rv_riepilogo in ruote_valide:
                 conteggio = sfaldamenti_totali_per_item_ruota[item_str_key].get(nome_rv_riepilogo, 0)
                 out.append(f"      - {nome_rv_riepilogo}: {conteggio} volt{'a' if conteggio == 1 else 'e'}")
-
+        
         if num_casi_eventi_spia_base == 0:
             out.append(f"    RIEPILOGO GENERALE {item_str_key}: Nessun evento spia registrato per l'analisi.")
+        elif total_actual_hits_for_item == 0:
+            perc_copertura_eventi_spia = 0.0
+            out.append(f"    RIEPILOGO GENERALE {item_str_key}: Uscito {total_actual_hits_for_item} volte su {num_casi_eventi_spia_base} eventi spia ({perc_copertura_eventi_spia:.1f}%)")
         else:
             perc_copertura_eventi_spia = (num_eventi_spia_coperti_per_item / num_casi_eventi_spia_base * 100) if num_casi_eventi_spia_base > 0 else 0
             out.append(f"    RIEPILOGO GENERALE {item_str_key}: Uscito {total_actual_hits_for_item} volte su {num_casi_eventi_spia_base} eventi spia ({perc_copertura_eventi_spia:.1f}%)")
@@ -1399,9 +1589,9 @@ def verifica_esiti_utente_su_eventi_spia(date_eventi_spia, combinazioni_utente, 
 def verifica_esiti_futuri(top_combinati_input, nomi_ruote_verifica, data_fine_analisi, n_colpi_futuri):
     if not top_combinati_input or not any(top_combinati_input.values()) or not nomi_ruote_verifica or data_fine_analisi is None or n_colpi_futuri <= 0:
         return "Errore: Input invalidi per verifica_esiti_futuri (post-analisi)."
-
+    
     is_online = data_source_var.get() == "Online"
-
+    
     estratti_items = top_combinati_input.get('estratto', [])
     ambi_items = [tuple(a.split('-')) for a in top_combinati_input.get('ambo', [])]
     terni_items = [tuple(t.split('-')) for t in top_combinati_input.get('terno', [])]
@@ -1416,14 +1606,14 @@ def verifica_esiti_futuri(top_combinati_input, nomi_ruote_verifica, data_fine_an
         df_ver_fut_ruota = df_ver_full[df_ver_full['Data'] > data_fine_analisi].copy().sort_values(by='Data').reset_index(drop=True)
         df_fin_fut_ruota = df_ver_fut_ruota.head(n_colpi_futuri)
         if not df_fin_fut_ruota.empty: df_cache_ver_fut[nome_rv] = df_fin_fut_ruota; ruote_con_dati_fut.append(nome_rv)
-
+    
     if not ruote_con_dati_fut: return f"Nessuna estrazione trovata su nessuna ruota di verifica dopo {data_fine_analisi.strftime('%d/%m/%Y')} per {n_colpi_futuri} colpi."
-
+    
     num_colpi_globalmente_analizzabili = n_colpi_futuri
     if ruote_con_dati_fut:
         min_len = min(len(df_cache_ver_fut.get(r, pd.DataFrame())) for r in ruote_con_dati_fut)
         num_colpi_globalmente_analizzabili = min_len
-
+    
     hits_registrati = {
         'estratto': {e: None for e in estratti_items},
         'ambo': {a: None for a in ambi_items},
@@ -1437,16 +1627,16 @@ def verifica_esiti_futuri(top_combinati_input, nomi_ruote_verifica, data_fine_an
         for colpo_idx, (_, row) in enumerate(df_finestra_ruota.iterrows(), 1):
             data_estrazione_corrente = row['Data'].date()
             set_numeri_riga = {str(row[col]).zfill(2) for col in cols_num if pd.notna(row[col])}
-
+            
             for item_e in estratti_items:
                 if hits_registrati['estratto'].get(item_e) is None and item_e in set_numeri_riga:
                     hits_registrati['estratto'][item_e] = (nome_rv, colpo_idx, data_estrazione_corrente)
-
+            
             if len(set_numeri_riga) >= 2:
                 for item_a in ambi_items:
                     if hits_registrati['ambo'].get(item_a) is None and set(item_a).issubset(set_numeri_riga):
                         hits_registrati['ambo'][item_a] = (nome_rv, colpo_idx, data_estrazione_corrente)
-
+            
             if len(set_numeri_riga) >= 3:
                 for item_t in terni_items:
                     if hits_registrati['terno'].get(item_t) is None and set(item_t).issubset(set_numeri_riga):
@@ -1465,12 +1655,12 @@ def verifica_esiti_futuri(top_combinati_input, nomi_ruote_verifica, data_fine_an
     out = [f"\n\n=== VERIFICA ESITI FUTURI (POST-ANALISI) ({n_colpi_futuri} Colpi dopo {data_fine_analisi.strftime('%d/%m/%Y')}) ==="]
     out.append(f"Ruote verificate con dati futuri disponibili: {', '.join(ruote_con_dati_fut) or 'Nessuna'}")
     if ruote_con_dati_fut: out.append(f"(Analisi basata su un minimo di {num_colpi_globalmente_analizzabili} colpi disponibili globalmente su queste ruote)")
-
+    
     sorti_config = [
-        ('estratto', estratti_items),
-        ('ambo', ambi_items),
+        ('estratto', estratti_items), 
+        ('ambo', ambi_items), 
         ('terno', terni_items),
-        ('quaterna', quaterne_items),
+        ('quaterna', quaterne_items), 
         ('cinquina', cinquine_items)
     ]
 
@@ -1492,7 +1682,7 @@ def verifica_esiti_futuri(top_combinati_input, nomi_ruote_verifica, data_fine_an
                     out.append(f"    - {item_str_formattato}: NON uscito")
         if not almeno_un_hit_per_sorte and lista_items and not (num_colpi_globalmente_analizzabili < n_colpi_futuri and ruote_con_dati_fut):
             out.append(f"    Nessuno degli elementi {tipo_sorte.upper()} è uscito nei colpi futuri analizzati.")
-
+    
     return "\n".join(out)
 
 def esegui_verifica_futura():
@@ -1503,41 +1693,40 @@ def esegui_verifica_futura():
 
     nomi_rv = info_ricerca_globale.get('ruote_verifica')
     data_fine = info_ricerca_globale.get('end_date')
-
+    
     if not nomi_rv or not data_fine:
         messagebox.showerror("Errore Verifica Futura", "Dati di base per l'analisi (Ruote verifica, Data Fine) mancanti.");
         risultato_text.config(state=tk.NORMAL); risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END, "Errore Verifica Futura.");risultato_text.config(state=tk.NORMAL); return
-
-    items_da_verificare = {'estratto': [], 'ambo': [], 'terno': [], 'quaterna': [], 'cinquina': []}
     
-    # === INIZIO BLOCCO CORRETTO ===
-    # Aggiungiamo gli estratti alla verifica
-    estratti_g = info_ricerca_globale.get('migliori_estratti_copertura_globale', [])
-    if estratti_g:
-        items_da_verificare['estratto'] = [item['estratto'] for item in estratti_g]
-
-    # Aggiungiamo gli ambi alla verifica
+    items_da_verificare = {'estratto': [], 'ambo': [], 'terno': []}
+    
+    # Per la verifica futura, usiamo solo i migliori per copertura globale
     ambi_g = info_ricerca_globale.get('migliori_ambi_copertura_globale', [])
+    terni_g = info_ricerca_globale.get('migliori_terni_copertura_globale', [])
+
     if ambi_g:
         items_da_verificare['ambo'] = [item['ambo'] for item in ambi_g]
-    # === FINE BLOCCO CORRETTO ===
+    if terni_g:
+        items_da_verificare['terno'] = [item['terno'] for item in terni_g]
 
-    combinazioni_per_ambo = [
-        ('migliori_terni_per_ambo_copertura_globale', 'terno'),
-        ('migliori_quartine_per_ambo_copertura_globale', 'quaterna'),
-        ('migliori_cinquine_per_ambo_copertura_globale', 'cinquina'),
-    ]
-    for key_info, key_items in combinazioni_per_ambo:
-        info = info_ricerca_globale.get(key_info, [])
-        if info:
-            combinazioni_derivate = {format_ambo_terno(item['combinazione']) for item in info}
-            items_da_verificare[key_items] = sorted(list(set(items_da_verificare.get(key_items, [])) | combinazioni_derivate))
+    # <<< INIZIO MODIFICA: Aggiunta dei terni derivati dai migliori terni per ambo globali >>>
+    terni_per_ambo_g = info_ricerca_globale.get('migliori_terni_per_ambo_copertura_globale', {})
+    if terni_per_ambo_g:
+        terni_derivati = set()
+        for ambo_str, abbinamenti in terni_per_ambo_g.items():
+            for abb in abbinamenti:
+                terno_completo = f"{ambo_str}-{abb['numero']}"
+                terni_derivati.add(terno_completo)
+        
+        # Unisci con i terni già presenti, evitando duplicati
+        items_da_verificare['terno'] = sorted(list(set(items_da_verificare['terno']) | terni_derivati))
+    # <<< FINE MODIFICA >>>
 
 
     if not any(items_da_verificare.values()):
         messagebox.showinfo("Verifica Futura", "Nessun risultato di 'Copertura Globale' trovato dall'analisi precedente da poter verificare.");
         risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END, "Nessun dato di Copertura Globale da verificare.");risultato_text.config(state=tk.NORMAL); return
-
+    
     try:
         n_colpi_fut = int(estrazioni_entry_verifica_futura.get())
         assert 1 <= n_colpi_fut <= MAX_COLPI_GIOCO
@@ -1582,14 +1771,14 @@ def esegui_verifica_mista():
             if not all(1<=n<=90 for n in numeri_int): raise ValueError("Numeri fuori range (1-90).")
             if len(set(numeri_int))!=len(numeri_int): raise ValueError("Numeri duplicati.")
             if not (1<=len(numeri_int)<=5): raise ValueError("Inserire da 1 a 5 numeri.")
-
+            
             numeri_validi_zfill = sorted([str(n).zfill(2) for n in numeri_int]); num_elementi = len(numeri_validi_zfill)
-
-            if num_elementi == 1:
+            
+            if num_elementi == 1: 
                 combinazioni_sets['estratto'].add(numeri_validi_zfill[0])
-            elif num_elementi == 2:
+            elif num_elementi == 2: 
                 combinazioni_sets['ambo'].add(tuple(numeri_validi_zfill))
-            elif num_elementi == 3:
+            elif num_elementi == 3: 
                 combinazioni_sets['terno'].add(tuple(numeri_validi_zfill))
                 for ambo_comb in itertools.combinations(numeri_validi_zfill, 2):
                     combinazioni_sets['ambo'].add(tuple(sorted(ambo_comb)))
@@ -1607,14 +1796,14 @@ def esegui_verifica_mista():
                     combinazioni_sets['terno'].add(tuple(sorted(terno_comb)))
                 for ambo_comb in itertools.combinations(numeri_validi_zfill, 2):
                     combinazioni_sets['ambo'].add(tuple(sorted(ambo_comb)))
-
-        except ValueError as ve:
+        
+        except ValueError as ve: 
             messagebox.showerror("Input Invalido",f"Errore riga '{riga_proc}': {ve}");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END, f"Errore input riga '{riga_proc}'.");risultato_text.config(state=tk.NORMAL);return
-        except Exception as e_parse:
+        except Exception as e_parse: 
             messagebox.showerror("Input Invalido",f"Errore riga '{riga_proc}': {e_parse}");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END, f"Errore input riga '{riga_proc}'.");risultato_text.config(state=tk.NORMAL);return
-
+            
     combinazioni_utente = {k: sorted(list(v)) for k, v in combinazioni_sets.items() if v}
-    if not any(combinazioni_utente.values()):
+    if not any(combinazioni_utente.values()): 
         messagebox.showerror("Input Invalido","Nessuna combinazione valida estratta.");risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END, "Nessuna combinazione valida.");risultato_text.config(state=tk.NORMAL);return
 
     date_eventi_spia = info_ricerca_globale.get('date_eventi_spia_ordinate')
@@ -1623,12 +1812,12 @@ def esegui_verifica_mista():
     end_ts = info_ricerca_globale.get('end_date')
     numeri_spia_originali = info_ricerca_globale.get('numeri_spia_input', [])
     spia_display_originale = format_ambo_terno(numeri_spia_originali) if isinstance(numeri_spia_originali, (list,tuple)) else str(numeri_spia_originali)
-
+    
     if not all([date_eventi_spia, nomi_rv, start_ts is not None, end_ts is not None]):
         messagebox.showerror("Errore Verifica Mista", "Dati analisi 'Successivi' mancanti. Eseguire prima un'analisi.");
         risultato_text.config(state=tk.NORMAL);risultato_text.delete(1.0,tk.END);risultato_text.insert(tk.END, "Errore Verifica Mista (dati mancanti).");risultato_text.config(state=tk.NORMAL); return
-
-    try:
+    
+    try: 
         n_colpi_misti = int(estrazioni_entry_verifica_mista.get())
         assert 1 <= n_colpi_misti <= MAX_COLPI_GIOCO
     except:
@@ -1639,13 +1828,13 @@ def esegui_verifica_mista():
     try:
         titolo_output = f"VERIFICA MISTA (COMBINAZIONI UTENTE) - Dopo Spia: {spia_display_originale} ({n_colpi_misti} Colpi dopo ogni Evento Spia)"
         res_str = verifica_esiti_utente_su_eventi_spia(date_eventi_spia, combinazioni_utente, nomi_rv, n_colpi_misti, start_ts, end_ts, titolo_sezione=titolo_output)
-
+        
         summary_input = "\nNumeri scelti per Verifica Mista:\n" + "\n".join([f"  - {r}" for r in righe_input_originali])
-
+        
         lines = res_str.splitlines(); insert_idx_summary = 1
         final_output_lines = lines[:insert_idx_summary] + [summary_input] + lines[insert_idx_summary:]
         output_verifica_mista = "\n".join(final_output_lines)
-
+        
         if output_verifica_mista and "Errore" not in output_verifica_mista and "Nessun caso evento spia" not in output_verifica_mista:
             mostra_popup_testo_semplice(f"Riepilogo Verifica Mista (Spia: {spia_display_originale})", output_verifica_mista)
     except Exception as e:
@@ -1804,7 +1993,7 @@ def esegui_ricerca_numeri_simpatici():
 # GUI e Mainloop
 # =============================================================================
 root = tk.Tk()
-root.title("Numeri Spia - Marker - Simpatici - Created by Massimo Ferrughelli- IL LOTTO DI MAX - ")
+root.title("Numeri Spia - Versione personalizzata per il PRINCIPE DEL LOTTO - ")
 root.geometry("1350x850")
 root.minsize(1200, 750)
 root.configure(bg="#f0f0f0")
@@ -1817,19 +2006,23 @@ style.configure("TEntry", padding=3); style.configure("TListbox", font=("Consola
 style.configure("TNotebook.Tab", padding=[10,5], font=("Segoe UI",10))
 style.configure("TRadiobutton", background="#f0f0f0", font=("Segoe UI", 9))
 
+main_container = ttk.Frame(root)
+main_container.pack(fill=tk.BOTH, expand=True)
 
-# =============================================================================
-# === INIZIO BLOCCO MODIFICATO: Rimozione Canvas e Scrollbar Principale ===
-# =============================================================================
-# Il meccanismo del canvas e della scrollbar principale è stato rimosso.
-# Ora il 'main_frame' è direttamente figlio della finestra 'root'.
-# Questo impedisce la comparsa della scrollbar verticale principale.
-main_frame = ttk.Frame(root, padding=10)
-main_frame.pack(fill=tk.BOTH, expand=True)
-# =============================================================================
-# === FINE BLOCCO MODIFICATO ===
-# =============================================================================
+canvas = tk.Canvas(main_container, bg="#f0f0f0", highlightthickness=0)
+scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+canvas.configure(yscrollcommand=scrollbar.set)
 
+scrollbar.pack(side="right", fill="y")
+canvas.pack(side="left", fill="both", expand=True)
+
+main_frame = ttk.Frame(canvas, padding=10)
+canvas.create_window((0, 0), window=main_frame, anchor="nw")
+
+def on_frame_configure(event):
+    canvas.configure(scrollregion=canvas.bbox("all"))
+
+main_frame.bind("<Configure>", on_frame_configure)
 
 # --- Controlli per la selezione della fonte dati ---
 source_frame_outer = ttk.LabelFrame(main_frame, text=" Fonte Dati ", padding=10)
@@ -1845,7 +2038,7 @@ btn_sfoglia.pack(side=tk.LEFT, padx=5)
 
 def toggle_data_source_ui():
     is_local = (data_source_var.get() == "Locale")
-
+    
     if is_local:
         for widget in cartella_frame.winfo_children():
             widget.config(state=tk.NORMAL)
@@ -1856,7 +2049,7 @@ def toggle_data_source_ui():
     if is_local:
         if not mappa_file_ruote():
             messagebox.showwarning("Cartella non valida", "Il percorso predefinito o selezionato non contiene file ruota validi.")
-
+    
     listboxes_to_update = [listbox_ruote_analisi, listbox_ruote_verifica, listbox_ruote_analisi_ant, listbox_ruote_simpatici]
     for lb in listboxes_to_update:
         if lb:
@@ -1903,17 +2096,6 @@ entry_numeri_spia.clear(); _=[entry_numeri_spia.append(ttk.Entry(spia_entry_cont
 posizioni_spia_options = ["Qualsiasi", "1a", "2a", "3a", "4a", "5a"]
 if 'combo_posizione_spia' not in globals() or globals()['combo_posizione_spia'] is None: combo_posizione_spia = ttk.Combobox(spia_entry_container_succ, values=posizioni_spia_options, width=8, font=("Segoe UI", 9), state="disabled"); combo_posizione_spia.set("Qualsiasi"); combo_posizione_spia.pack(side=tk.LEFT, padx=(5,0), ipady=1)
 estrazioni_frame_succ = ttk.LabelFrame(center_controls_frame_succ, text=" 5. Estrazioni Successive ",padding=5); estrazioni_frame_succ.pack(fill=tk.X,pady=5)
-# --- NUOVO BLOCCO DA AGGIUNGERE ---
-eventi_spia_frame = ttk.LabelFrame(center_controls_frame_succ, text=" 6. N. Eventi Spia da Usare ", padding=5)
-eventi_spia_frame.pack(fill=tk.X, pady=5)
-ttk.Label(eventi_spia_frame, text="Quanti (lascia vuoto per tutti):", style="Small.TLabel").pack(anchor="w")
-# Assicurati di dichiarare questa variabile globale all'inizio del file o della funzione main
-# Esempio: entry_num_eventi_spia = None
-global entry_num_eventi_spia
-entry_num_eventi_spia = ttk.Entry(eventi_spia_frame, width=5, justify=tk.CENTER, font=("Segoe UI", 10))
-entry_num_eventi_spia.pack(anchor="w", pady=2, ipady=2)
-entry_num_eventi_spia.insert(0, "") # Lo lasciamo vuoto di default
-# --- FINE NUOVO BLOCCO ---
 ttk.Label(estrazioni_frame_succ, text=f"Quante (1-{MAX_COLPI_GIOCO}):", style="Small.TLabel").pack(anchor="w")
 estrazioni_entry_succ = ttk.Entry(estrazioni_frame_succ,width=5,justify=tk.CENTER,font=("Segoe UI",10)); estrazioni_entry_succ.pack(anchor="w",pady=2,ipady=2); estrazioni_entry_succ.insert(0,"5"); _toggle_posizione_spia_input_tab_succ()
 buttons_frame_succ = ttk.Frame(controls_frame_succ); buttons_frame_succ.grid(row=0, column=3, sticky="ns", padx=(10,0))
@@ -1933,14 +2115,14 @@ estrazioni_entry_ant = ttk.Entry(estrazioni_frame_ant,width=5,justify=tk.CENTER,
 buttons_frame_ant = ttk.Frame(controls_frame_ant); buttons_frame_ant.grid(row=0,column=2,sticky="ns",padx=(10,0)); button_cerca_ant = ttk.Button(buttons_frame_ant, text="Cerca Antecedenti",command=lambda:cerca_numeri(modalita="antecedenti")); button_cerca_ant.pack(pady=5,fill=tk.X,ipady=3)
 tab_simpatici = ttk.Frame(notebook, padding=10); notebook.add(tab_simpatici, text=' Numeri Simpatici ')
 controls_frame_simpatici_outer = ttk.Frame(tab_simpatici); controls_frame_simpatici_outer.pack(fill=tk.X, pady=5); controls_frame_simpatici_outer.columnconfigure(0, weight=0); controls_frame_simpatici_outer.columnconfigure(1, weight=1)
-input_params_simpatici_frame = ttk.Frame(controls_frame_simpatici_outer); input_params_simpatici_frame.grid(row=0, column=0, sticky="ns", padx=(0,10));
-lbl_numero_target = ttk.Label(input_params_simpatici_frame, text="Numero Scelto (1-90):", style="Title.TLabel");
+input_params_simpatici_frame = ttk.Frame(controls_frame_simpatici_outer); input_params_simpatici_frame.grid(row=0, column=0, sticky="ns", padx=(0,10)); 
+lbl_numero_target = ttk.Label(input_params_simpatici_frame, text="Numero Scelto (1-90):", style="Title.TLabel"); 
 lbl_numero_target.pack(anchor="w", pady=(0,2))
-entry_numero_target_simpatici = ttk.Entry(input_params_simpatici_frame, width=10, justify=tk.CENTER, font=("Segoe UI",10)); entry_numero_target_simpatici.pack(anchor="w", pady=(0,10), ipady=2); entry_numero_target_simpatici.insert(0, "10");
-lbl_top_n_simpatici = ttk.Label(input_params_simpatici_frame, text="Quanti Numeri Simpatici (Top N):", style="Title.TLabel");
+entry_numero_target_simpatici = ttk.Entry(input_params_simpatici_frame, width=10, justify=tk.CENTER, font=("Segoe UI",10)); entry_numero_target_simpatici.pack(anchor="w", pady=(0,10), ipady=2); entry_numero_target_simpatici.insert(0, "10"); 
+lbl_top_n_simpatici = ttk.Label(input_params_simpatici_frame, text="Quanti Numeri Simpatici (Top N):", style="Title.TLabel"); 
 lbl_top_n_simpatici.pack(anchor="w", pady=(5,2))
-entry_top_n_simpatici = ttk.Entry(input_params_simpatici_frame, width=10, justify=tk.CENTER, font=("Segoe UI",10)); entry_top_n_simpatici.pack(anchor="w", pady=(0,10), ipady=2); entry_top_n_simpatici.insert(0, "10");
-button_cerca_simpatici = ttk.Button(input_params_simpatici_frame, text="Cerca Numeri Simpatici", command=esegui_ricerca_numeri_simpatici);
+entry_top_n_simpatici = ttk.Entry(input_params_simpatici_frame, width=10, justify=tk.CENTER, font=("Segoe UI",10)); entry_top_n_simpatici.pack(anchor="w", pady=(0,10), ipady=2); entry_top_n_simpatici.insert(0, "10"); 
+button_cerca_simpatici = ttk.Button(input_params_simpatici_frame, text="Cerca Numeri Simpatici", command=esegui_ricerca_numeri_simpatici); 
 button_cerca_simpatici.pack(pady=10, fill=tk.X, ipady=3)
 ruote_simpatici_frame_outer = ttk.Frame(controls_frame_simpatici_outer); ruote_simpatici_frame_outer.grid(row=0, column=1, sticky="nsew", padx=(10,0)); ttk.Label(ruote_simpatici_frame_outer, text="Ruote di Ricerca (CTRL/SHIFT per multiple, nessuna = tutte):", style="Title.TLabel").pack(anchor="w")
 ruote_simpatici_list_frame_inner = ttk.Frame(ruote_simpatici_frame_outer); ruote_simpatici_list_frame_inner.pack(fill=tk.BOTH, expand=True, pady=(5,0)); scrollbar_rs_y = ttk.Scrollbar(ruote_simpatici_list_frame_inner, orient=tk.VERTICAL); scrollbar_rs_y.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1948,33 +2130,8 @@ listbox_ruote_simpatici = tk.Listbox(ruote_simpatici_list_frame_inner, height=10
 common_controls_top_frame = ttk.Frame(main_frame); common_controls_top_frame.pack(fill=tk.X,pady=5)
 dates_frame = ttk.LabelFrame(common_controls_top_frame, text=" Periodo Analisi (Comune) ",padding=5); dates_frame.pack(side=tk.LEFT,padx=(0,10),fill=tk.Y); dates_frame.columnconfigure(1,weight=1)
 ttk.Label(dates_frame,text="Da:",anchor="e").grid(row=0,column=0,padx=2,pady=2,sticky="w"); start_date_default = datetime.date.today()-datetime.timedelta(days=365*3)
-start_date_entry = DateEntry(dates_frame,
-                           width=10,
-                           background='#3498db',
-                           foreground='white',
-                           borderwidth=2,
-                           date_pattern='dd/mm/yyyy',
-                           font=("Segoe UI",9),
-                           year=start_date_default.year,
-                           month=start_date_default.month,
-                           day=start_date_default.day,
-                           firstweekday='monday',
-                           month_names=MESI_ITALIANI,
-                           day_names=GIORNI_ITALIANI,
-                           locale='it_IT')
-start_date_entry.grid(row=0,column=1,padx=2,pady=2,sticky="ew")
-ttk.Label(dates_frame,text="A:",anchor="e").grid(row=1,column=0,padx=2,pady=2,sticky="w"); end_date_entry = DateEntry(dates_frame,
-                         width=10,
-                         background='#3498db',
-                         foreground='white',
-                         borderwidth=2,
-                         date_pattern='dd/mm/yyyy',
-                         font=("Segoe UI",9),
-                         firstweekday='monday',
-                         month_names=MESI_ITALIANI,
-                         day_names=GIORNI_ITALIANI,
-                         locale='it_IT')
-end_date_entry.grid(row=1,column=1,padx=2,pady=2,sticky="ew")
+start_date_entry = DateEntry(dates_frame,width=10,background='#3498db',foreground='white',borderwidth=2,date_pattern='yyyy-mm-dd',font=("Segoe UI",9),year=start_date_default.year,month=start_date_default.month,day=start_date_default.day); start_date_entry.grid(row=0,column=1,padx=2,pady=2,sticky="ew")
+ttk.Label(dates_frame,text="A:",anchor="e").grid(row=1,column=0,padx=2,pady=2,sticky="w"); end_date_entry = DateEntry(dates_frame,width=10,background='#3498db',foreground='white',borderwidth=2,date_pattern='yyyy-mm-dd',font=("Segoe UI",9)); end_date_entry.grid(row=1,column=1,padx=2,pady=2,sticky="ew")
 common_buttons_frame = ttk.Frame(common_controls_top_frame); common_buttons_frame.pack(side=tk.LEFT,padx=10,fill=tk.Y)
 button_salva = ttk.Button(common_buttons_frame,text="Salva Risultati",command=salva_risultati); button_salva.pack(side=tk.LEFT,pady=5,padx=5,ipady=3)
 button_visualizza = ttk.Button(common_buttons_frame,text="Visualizza Grafici\n(Solo Successivi)",command=visualizza_grafici_successivi); button_visualizza.pack(side=tk.LEFT,pady=5,padx=5,ipady=0); button_visualizza.config(state=tk.DISABLED)
@@ -1982,7 +2139,7 @@ button_visualizza = ttk.Button(common_buttons_frame,text="Visualizza Grafici\n(S
 post_analysis_outer_frame = ttk.Frame(main_frame)
 post_analysis_outer_frame.pack(fill=tk.X, pady=(5, 0))
 post_analysis_outer_frame.columnconfigure(0, weight=1)
-post_analysis_outer_frame.columnconfigure(1, weight=0)
+post_analysis_outer_frame.columnconfigure(1, weight=0) 
 post_analysis_outer_frame.columnconfigure(2, weight=1)
 
 # Frame per Verifica Futura (sinistra)
@@ -1996,54 +2153,21 @@ button_verifica_futura = ttk.Button(verifica_futura_frame,text="Verifica Futura\
 button_verifica_futura.pack(pady=5,fill=tk.X,ipady=0)
 button_verifica_futura.config(state=tk.DISABLED)
 
-# Frame per Opzioni Risultati (centro) - ORDINE CORRETTO E PULITO
+# Frame per Opzioni Risultati (centro)
 opzioni_risultati_frame = ttk.LabelFrame(post_analysis_outer_frame, text=" Opzioni Risultati Copertura ", padding=5)
 opzioni_risultati_frame.grid(row=0, column=1, sticky="ns", padx=5)
-
-# Riga 0: Estratti
 ttk.Label(opzioni_risultati_frame, text="N. Estratti da mostrare:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
 entry_num_estratti_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
 entry_num_estratti_popup.grid(row=0, column=1, sticky="w", padx=5, pady=2)
-entry_num_estratti_popup.insert(0, "3")
-
-# Riga 1: Ambi
+entry_num_estratti_popup.insert(0, "10")
 ttk.Label(opzioni_risultati_frame, text="N. Ambi da mostrare:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
 entry_num_ambi_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
 entry_num_ambi_popup.grid(row=1, column=1, sticky="w", padx=5, pady=2)
-entry_num_ambi_popup.insert(0, "5")
-
-# Riga 2: Terni
+entry_num_ambi_popup.insert(0, "10")
 ttk.Label(opzioni_risultati_frame, text="N. Terni da mostrare:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
 entry_num_terni_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
 entry_num_terni_popup.grid(row=2, column=1, sticky="w", padx=5, pady=2)
-entry_num_terni_popup.insert(0, "5")
-
-# Riga 3: Terni per Ambo
-ttk.Label(opzioni_risultati_frame, text="N. Terni per Ambo:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
-entry_num_terni_per_ambo_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
-entry_num_terni_per_ambo_popup.grid(row=3, column=1, sticky="w", padx=5, pady=2)
-entry_num_terni_per_ambo_popup.insert(0, "3")
-
-# Riga 4: Quartine per Ambo (AGGIUNTO)
-ttk.Label(opzioni_risultati_frame, text="N. Quartine per Ambo:").grid(row=4, column=0, sticky="w", padx=5, pady=2)
-entry_num_quartine_per_ambo_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
-entry_num_quartine_per_ambo_popup.grid(row=4, column=1, sticky="w", padx=5, pady=2)
-entry_num_quartine_per_ambo_popup.insert(0, "3")
-
-# Riga 5: Cinquine per Ambo (AGGIUNTO)
-ttk.Label(opzioni_risultati_frame, text="N. Cinquine per Ambo:").grid(row=5, column=0, sticky="w", padx=5, pady=2)
-entry_num_cinquine_per_ambo_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
-entry_num_cinquine_per_ambo_popup.grid(row=5, column=1, sticky="w", padx=5, pady=2)
-entry_num_cinquine_per_ambo_popup.insert(0, "3")
-
-# Riga 6 e 7: Checkbox
-calcola_coperture_var = tk.BooleanVar(value=True)
-check_coperture = ttk.Checkbutton(opzioni_risultati_frame, text="Calcola Coperture Globali", variable=calcola_coperture_var)
-check_coperture.grid(row=6, column=0, columnspan=2, sticky='w', pady=(5,0))
-
-calcola_ritardi_var = tk.BooleanVar(value=True)
-check_ritardi = ttk.Checkbutton(opzioni_risultati_frame, text="Calcola Ritardi Attuali (Globali)", variable=calcola_ritardi_var)
-check_ritardi.grid(row=7, column=0, columnspan=2, sticky='w')
+entry_num_terni_popup.insert(0, "10")
 
 # Frame per Verifica Mista (destra)
 verifica_mista_frame = ttk.LabelFrame(post_analysis_outer_frame, text=" Verifica Mista (su Eventi Spia) ",padding=5)
@@ -2056,20 +2180,9 @@ estrazioni_entry_verifica_mista = ttk.Entry(verifica_mista_frame,width=5,justify
 button_verifica_mista = ttk.Button(verifica_mista_frame,text="Verifica Mista\n(su Eventi Spia)",command=esegui_verifica_mista); button_verifica_mista.pack(pady=5,fill=tk.X,ipady=0); button_verifica_mista.config(state=tk.DISABLED)
 
 ttk.Label(main_frame, text="Risultati Analisi (Log):", style="Header.TLabel").pack(anchor="w",pady=(15,0))
-risultato_outer_frame = ttk.Frame(main_frame)
-risultato_outer_frame.pack(fill=tk.BOTH,expand=True,pady=5)
-
-risultato_text = tk.Text(
-    risultato_outer_frame,
-    wrap=tk.WORD,
-    font=("Consolas", 10),
-    height=15,
-    state=tk.NORMAL,
-    bd=1,
-    relief="sunken"
-)
-risultato_text.pack(fill=tk.BOTH,expand=True)
-
+risultato_outer_frame = ttk.Frame(main_frame); risultato_outer_frame.pack(fill=tk.BOTH,expand=True,pady=5); risultato_scroll_y = ttk.Scrollbar(risultato_outer_frame,orient=tk.VERTICAL); risultato_scroll_y.pack(side=tk.RIGHT,fill=tk.Y); risultato_scroll_x = ttk.Scrollbar(risultato_outer_frame,orient=tk.HORIZONTAL); risultato_scroll_x.pack(side=tk.BOTTOM,fill=tk.X)
+risultato_text = tk.Text(risultato_outer_frame,wrap=tk.NONE,font=("Consolas",10),height=15,yscrollcommand=risultato_scroll_y.set,xscrollcommand=risultato_scroll_x.set,state=tk.NORMAL,bd=1,relief="sunken")
+risultato_text.pack(fill=tk.BOTH,expand=True); risultato_scroll_y.config(command=risultato_text.yview); risultato_scroll_x.config(command=risultato_text.xview)
 
 def mappa_file_ruote():
     global file_ruote, cartella_entry
@@ -2081,7 +2194,7 @@ def mappa_file_ruote():
             fp = os.path.join(cartella, file)
             if os.path.isfile(fp) and file.lower().endswith(".txt"):
                 nome_base = os.path.splitext(file)[0].upper()
-                if nome_base in ruote_valide:
+                if nome_base in ruote_valide: 
                     file_ruote[nome_base] = fp
                     found = True
         return found
@@ -2092,7 +2205,7 @@ def aggiorna_lista_file_gui(target_listbox):
     global URL_RUOTE, file_ruote, data_source_var
     if not target_listbox: return
     target_listbox.config(state=tk.NORMAL); target_listbox.delete(0, tk.END)
-
+    
     if data_source_var.get() == "Online":
         lista_ruote_originale = list(URL_RUOTE.keys())
     else: # Locale
@@ -2117,53 +2230,72 @@ def on_sfoglia_click():
     cartella_sel = filedialog.askdirectory(title="Seleziona Cartella Estrazioni")
     if cartella_sel:
         cartella_entry.delete(0,tk.END); cartella_entry.insert(0,cartella_sel)
-        if mappa_file_ruote():
+        if mappa_file_ruote(): 
             listboxes = [listbox_ruote_analisi, listbox_ruote_verifica, listbox_ruote_analisi_ant, listbox_ruote_simpatici]
             for lb in listboxes:
                 if lb:
                     aggiorna_lista_file_gui(lb)
-        else:
+        else: 
             messagebox.showwarning("Nessun File", "Nessun file .txt valido trovato nella cartella selezionata.")
 
 def main():
     global root, risultato_text, MAX_COLPI_GIOCO, cartella_entry, btn_sfoglia
     global calcola_ritardo_globale_var
+    # <<< MODIFICA RICHIESTA: Aggiunta nuova variabile per l'input >>>
     global entry_num_estratti_popup, entry_num_ambi_popup, entry_num_terni_popup, entry_num_terni_per_ambo_popup
-    global entry_num_quartine_per_ambo_popup, entry_num_cinquine_per_ambo_popup
-
+    
     desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
     default_folder_path = os.path.join(desktop_path, "NUMERICAL_EMPATHY_COMPLETO_2025")
     cartella_entry.insert(0, default_folder_path)
     btn_sfoglia.config(command=on_sfoglia_click)
-
-    calcola_ritardo_globale_var = tk.BooleanVar(value=True)
-
-    # --- Riorganizzazione GUI per i nuovi campi ---
-    # Questa sezione è già stata creata sopra, la ridefinizione qui potrebbe causare problemi.
-    # Assicuriamoci che 'entry_num_estratti_popup' e gli altri siano definiti una sola volta.
-    # L'unico campo mancante nel layout originale era entry_num_estratti_popup, lo aggiungiamo.
-    opzioni_frame = post_analysis_outer_frame.grid_slaves(row=0, column=1)[0] # Otteniamo il frame già creato
     
-    ttk.Label(opzioni_frame, text="N. Estratti da mostrare:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-    entry_num_estratti_popup = ttk.Entry(opzioni_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
+    calcola_ritardo_globale_var = tk.BooleanVar(value=True) 
+    
+    # --- Riorganizzazione GUI per il nuovo campo ---
+    opzioni_risultati_frame = ttk.LabelFrame(post_analysis_outer_frame, text=" Opzioni Risultati Copertura ", padding=5)
+    opzioni_risultati_frame.grid(row=0, column=1, sticky="ns", padx=5)
+    
+    ttk.Label(opzioni_risultati_frame, text="N. Estratti da mostrare:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+    entry_num_estratti_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
     entry_num_estratti_popup.grid(row=0, column=1, sticky="w", padx=5, pady=2)
     entry_num_estratti_popup.insert(0, "3")
-    
+
+    ttk.Label(opzioni_risultati_frame, text="N. Ambi da mostrare:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+    entry_num_ambi_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
+    entry_num_ambi_popup.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+    entry_num_ambi_popup.insert(0, "5")
+
+    ttk.Label(opzioni_risultati_frame, text="N. Terni da mostrare:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+    entry_num_terni_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
+    entry_num_terni_popup.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+    entry_num_terni_popup.insert(0, "5")
+
+    # <<< MODIFICA RICHIESTA: Aggiunta del nuovo campo >>>
+    ttk.Label(opzioni_risultati_frame, text="N. Terni per Ambo:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+    entry_num_terni_per_ambo_popup = ttk.Entry(opzioni_risultati_frame, width=5, justify=tk.CENTER, font=("Segoe UI",10))
+    entry_num_terni_per_ambo_popup.grid(row=3, column=1, sticky="w", padx=5, pady=2)
+    entry_num_terni_per_ambo_popup.insert(0, "3")
+    # <<< FINE MODIFICA >>>
+
+    check_ritardo = ttk.Checkbutton(opzioni_risultati_frame, text="Calcola Ritardo Attuale Globale (Lento)", variable=calcola_ritardo_globale_var)
+    check_ritardo.grid(row=4, column=0, columnspan=2, sticky='w')
+    # --- Fine riorganizzazione ---
 
     toggle_data_source_ui()
-
+    
     listboxes = [listbox_ruote_analisi, listbox_ruote_verifica, listbox_ruote_analisi_ant, listbox_ruote_simpatici]
     for lb in listboxes:
         if lb:
             aggiorna_lista_file_gui(lb)
-
+    
     risultato_text.config(state=tk.NORMAL); risultato_text.delete(1.0, tk.END)
     welcome_message = (
-        f"Ciao Max...cosa studiamo oggi?\n\n"
+        f"Buongiorno mio Principe!\n\n"
         "1. Scegli la 'Fonte Dati': Online (da GitHub) o Locale (dal tuo PC).\n"
         "   - Se 'Locale', assicurati che il percorso della cartella sia corretto.\n"
         "2. Imposta il periodo di analisi.\n"
         "3. Scegli la modalità di analisi e clicca il relativo pulsante 'Cerca...'\n\n"
+        "NOVITÀ: Logica 'Terni per Ambo' corretta e reso configurabile il numero di risultati."
     )
     risultato_text.insert(tk.END, welcome_message)
     root.mainloop()

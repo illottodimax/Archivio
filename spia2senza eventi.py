@@ -16,16 +16,6 @@ from collections import Counter, OrderedDict
 import urllib.request
 import urllib.error
 
-# All'inizio del file, dopo gli import
-MESI_ITALIANI = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
-                 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre']
-
-GIORNI_ITALIANI = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
-
-# Aggiungi questo per debug
-print("MESI_ITALIANI:", MESI_ITALIANI)
-print("GIORNI_ITALIANI:", GIORNI_ITALIANI)
-
 try:
     import seaborn as sns
     SEABORN_AVAILABLE = True
@@ -805,19 +795,7 @@ def mostra_popup_risultati_spia(info_ricerca, risultati_analisi):
     popup_content_list.append(f"Periodo: {start_date_str} - {end_date_str}")
     popup_content_list.append(f"Estrazioni Successive Analizzate: {info_ricerca.get('n_estrazioni', 'N/D')}")
     date_eventi_spia = info_ricerca.get('date_eventi_spia_ordinate', [])
-    
-        # --- INIZIO MODIFICA ---
-    # Mostra un messaggio che chiarisce quanti eventi sono stati usati
-    date_eventi_spia = info_ricerca.get('date_eventi_spia_ordinate', [])
-    num_eventi_usati = len(date_eventi_spia)
-    num_eventi_richiesti = info_ricerca.get('num_eventi_richiesti')
-    total_events_found = info_ricerca.get('total_events_found_before_filtering', num_eventi_usati)
-
-    if num_eventi_richiesti is not None:
-        popup_content_list.append(f"Eventi Spia Analizzati: Ultimi {num_eventi_usati} su {total_events_found} trovati nel periodo.")
-    else:
-        popup_content_list.append(f"Numero Totale di Eventi Spia: {num_eventi_usati}")
-    # --- FINE MODIFICA ---
+    popup_content_list.append(f"Numero Totale di Eventi Spia: {len(date_eventi_spia)}")
     
     # --- INIZIO BLOCCO RISULTATI PER RUOTA ---
     if risultati_analisi:
@@ -950,17 +928,13 @@ def mostra_popup_risultati_spia(info_ricerca, risultati_analisi):
 def cerca_numeri(modalita="successivi"):
     global risultati_globali, info_ricerca_globale, URL_RUOTE, file_ruote, risultato_text, root, data_source_var
     global start_date_entry, end_date_entry, listbox_ruote_analisi, listbox_ruote_verifica
-    
-    # Rimuovi tutto il codice del locale da qui
-    
     global entry_numeri_spia, estrazioni_entry_succ, listbox_ruote_analisi_ant
     global entry_numeri_obiettivo, estrazioni_entry_ant, tipo_spia_var_global, combo_posizione_spia
     global MAX_COLPI_GIOCO
     global entry_num_estratti_popup, entry_num_ambi_popup, entry_num_terni_popup, entry_num_terni_per_ambo_popup
     global entry_num_quartine_per_ambo_popup, entry_num_cinquine_per_ambo_popup
     global calcola_coperture_var, calcola_ritardi_var
-    global entry_num_eventi_spia
-    
+
     if data_source_var.get() == "Locale" and (not mappa_file_ruote() or not file_ruote):
         messagebox.showerror("Errore Cartella", "Modalità 'Locale' selezionata, ma impossibile leggere i file dalla cartella specificata o la cartella non contiene file validi.\nAssicurati che il percorso sia corretto e la cartella contenga file TXT delle ruote.")
         return
@@ -1013,23 +987,7 @@ def cerca_numeri(modalita="successivi"):
         try:
             num_cinquine_per_ambo_da_mostrare = int(entry_num_cinquine_per_ambo_popup.get())
             if not 1 <= num_cinquine_per_ambo_da_mostrare <= 20: raise ValueError()
-
         except: num_cinquine_per_ambo_da_mostrare = 3
-
-                # --- INIZIO BLOCCO LOGICO CORRETTO ---
-        num_eventi_da_considerare = None
-        if entry_num_eventi_spia: # Controlla che il widget esista
-            try:
-                val_str = entry_num_eventi_spia.get().strip()
-                if val_str:
-                    num_eventi_da_considerare = int(val_str)
-                    if num_eventi_da_considerare <= 0:
-                        messagebox.showwarning("Input non valido", "Il numero di eventi deve essere positivo.")
-                        num_eventi_da_considerare = None # Resetta se non valido
-            except (ValueError, tk.TclError):
-                messagebox.showwarning("Input non valido", "Inserire un numero intero per gli eventi.")
-                num_eventi_da_considerare = None
-        # --- FINE BLOCCO LOGICO CORRETTO ---
 
         ra_idx,rv_idx = listbox_ruote_analisi.curselection(),listbox_ruote_verifica.curselection()
         if not ra_idx or not rv_idx:
@@ -1083,19 +1041,7 @@ def cerca_numeri(modalita="successivi"):
             messaggi_out.append(f"\nNESSUNA USCITA SPIA TROVATA PER {spia_display_str}.")
             aggiorna_risultati_globali([],info_curr,modalita="successivi")
             mostra_popup_risultati_spia(info_ricerca_globale, risultati_globali); return
-        date_eventi_spia_ord=sorted(list(all_date_eventi_spia))
-                 # --- INIZIO BLOCCO FILTRO CORRETTO ---
-        total_events_found_before_filtering = len(date_eventi_spia_ord)
-        info_curr['total_events_found_before_filtering'] = total_events_found_before_filtering
-        info_curr['num_eventi_richiesti'] = num_eventi_da_considerare
-
-        if num_eventi_da_considerare is not None and num_eventi_da_considerare > 0:
-            date_eventi_spia_ord = date_eventi_spia_ord[-num_eventi_da_considerare:]
-        # --- FINE BLOCCO FILTRO CORRETTO ---
-        
-        n_eventi_spia_tot=len(date_eventi_spia_ord)
-        info_curr['date_eventi_spia_ordinate']=date_eventi_spia_ord
-        n_eventi_spia_tot=len(date_eventi_spia_ord)
+        date_eventi_spia_ord=sorted(list(all_date_eventi_spia)); n_eventi_spia_tot=len(date_eventi_spia_ord)
         info_curr['date_eventi_spia_ordinate']=date_eventi_spia_ord
 
         messaggi_out.append("\n--- FASE 2: Analisi Ruote Verifica ---")
@@ -1903,17 +1849,6 @@ entry_numeri_spia.clear(); _=[entry_numeri_spia.append(ttk.Entry(spia_entry_cont
 posizioni_spia_options = ["Qualsiasi", "1a", "2a", "3a", "4a", "5a"]
 if 'combo_posizione_spia' not in globals() or globals()['combo_posizione_spia'] is None: combo_posizione_spia = ttk.Combobox(spia_entry_container_succ, values=posizioni_spia_options, width=8, font=("Segoe UI", 9), state="disabled"); combo_posizione_spia.set("Qualsiasi"); combo_posizione_spia.pack(side=tk.LEFT, padx=(5,0), ipady=1)
 estrazioni_frame_succ = ttk.LabelFrame(center_controls_frame_succ, text=" 5. Estrazioni Successive ",padding=5); estrazioni_frame_succ.pack(fill=tk.X,pady=5)
-# --- NUOVO BLOCCO DA AGGIUNGERE ---
-eventi_spia_frame = ttk.LabelFrame(center_controls_frame_succ, text=" 6. N. Eventi Spia da Usare ", padding=5)
-eventi_spia_frame.pack(fill=tk.X, pady=5)
-ttk.Label(eventi_spia_frame, text="Quanti (lascia vuoto per tutti):", style="Small.TLabel").pack(anchor="w")
-# Assicurati di dichiarare questa variabile globale all'inizio del file o della funzione main
-# Esempio: entry_num_eventi_spia = None
-global entry_num_eventi_spia
-entry_num_eventi_spia = ttk.Entry(eventi_spia_frame, width=5, justify=tk.CENTER, font=("Segoe UI", 10))
-entry_num_eventi_spia.pack(anchor="w", pady=2, ipady=2)
-entry_num_eventi_spia.insert(0, "") # Lo lasciamo vuoto di default
-# --- FINE NUOVO BLOCCO ---
 ttk.Label(estrazioni_frame_succ, text=f"Quante (1-{MAX_COLPI_GIOCO}):", style="Small.TLabel").pack(anchor="w")
 estrazioni_entry_succ = ttk.Entry(estrazioni_frame_succ,width=5,justify=tk.CENTER,font=("Segoe UI",10)); estrazioni_entry_succ.pack(anchor="w",pady=2,ipady=2); estrazioni_entry_succ.insert(0,"5"); _toggle_posizione_spia_input_tab_succ()
 buttons_frame_succ = ttk.Frame(controls_frame_succ); buttons_frame_succ.grid(row=0, column=3, sticky="ns", padx=(10,0))
@@ -1948,33 +1883,8 @@ listbox_ruote_simpatici = tk.Listbox(ruote_simpatici_list_frame_inner, height=10
 common_controls_top_frame = ttk.Frame(main_frame); common_controls_top_frame.pack(fill=tk.X,pady=5)
 dates_frame = ttk.LabelFrame(common_controls_top_frame, text=" Periodo Analisi (Comune) ",padding=5); dates_frame.pack(side=tk.LEFT,padx=(0,10),fill=tk.Y); dates_frame.columnconfigure(1,weight=1)
 ttk.Label(dates_frame,text="Da:",anchor="e").grid(row=0,column=0,padx=2,pady=2,sticky="w"); start_date_default = datetime.date.today()-datetime.timedelta(days=365*3)
-start_date_entry = DateEntry(dates_frame,
-                           width=10,
-                           background='#3498db',
-                           foreground='white',
-                           borderwidth=2,
-                           date_pattern='dd/mm/yyyy',
-                           font=("Segoe UI",9),
-                           year=start_date_default.year,
-                           month=start_date_default.month,
-                           day=start_date_default.day,
-                           firstweekday='monday',
-                           month_names=MESI_ITALIANI,
-                           day_names=GIORNI_ITALIANI,
-                           locale='it_IT')
-start_date_entry.grid(row=0,column=1,padx=2,pady=2,sticky="ew")
-ttk.Label(dates_frame,text="A:",anchor="e").grid(row=1,column=0,padx=2,pady=2,sticky="w"); end_date_entry = DateEntry(dates_frame,
-                         width=10,
-                         background='#3498db',
-                         foreground='white',
-                         borderwidth=2,
-                         date_pattern='dd/mm/yyyy',
-                         font=("Segoe UI",9),
-                         firstweekday='monday',
-                         month_names=MESI_ITALIANI,
-                         day_names=GIORNI_ITALIANI,
-                         locale='it_IT')
-end_date_entry.grid(row=1,column=1,padx=2,pady=2,sticky="ew")
+start_date_entry = DateEntry(dates_frame,width=10,background='#3498db',foreground='white',borderwidth=2,date_pattern='yyyy-mm-dd',font=("Segoe UI",9),year=start_date_default.year,month=start_date_default.month,day=start_date_default.day); start_date_entry.grid(row=0,column=1,padx=2,pady=2,sticky="ew")
+ttk.Label(dates_frame,text="A:",anchor="e").grid(row=1,column=0,padx=2,pady=2,sticky="w"); end_date_entry = DateEntry(dates_frame,width=10,background='#3498db',foreground='white',borderwidth=2,date_pattern='yyyy-mm-dd',font=("Segoe UI",9)); end_date_entry.grid(row=1,column=1,padx=2,pady=2,sticky="ew")
 common_buttons_frame = ttk.Frame(common_controls_top_frame); common_buttons_frame.pack(side=tk.LEFT,padx=10,fill=tk.Y)
 button_salva = ttk.Button(common_buttons_frame,text="Salva Risultati",command=salva_risultati); button_salva.pack(side=tk.LEFT,pady=5,padx=5,ipady=3)
 button_visualizza = ttk.Button(common_buttons_frame,text="Visualizza Grafici\n(Solo Successivi)",command=visualizza_grafici_successivi); button_visualizza.pack(side=tk.LEFT,pady=5,padx=5,ipady=0); button_visualizza.config(state=tk.DISABLED)

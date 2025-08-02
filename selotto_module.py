@@ -806,7 +806,7 @@ def analisi_superenalotto(file_path, start_date, end_date, sequence_length=5,
         if final_model is None: return None, "Costruzione modello finale fallita.", last_update_date
 
         # Usiamo EarlyStopping sulla loss di training
-        final_early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=1)
+        final_early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=0)
         log_callback(f"Inizio addestramento finale (max {max_epochs} epoche, ES su 'loss', Patience={patience})...")
         history_final = final_model.fit(X_scaled_final, y, epochs=max_epochs, batch_size=batch_size,
                                         callbacks=[final_early_stopping, gui_log_callback_final], verbose=0)

@@ -1,12 +1,13 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext, font as tkfont, messagebox
+from tkinter import ttk, scrolledtext, font as tkfont, messagebox, filedialog
 import threading
 import pandas as pd
 from collections import defaultdict, Counter
 from io import StringIO
 import requests
+import os
 
-# --- Configurazione GitHub (invariata) ---
+# --- Configurazione GitHub ---
 GITHUB_USER = "illottodimax"
 GITHUB_REPO = "Archivio"
 GITHUB_BRANCH = "main"
@@ -21,7 +22,6 @@ URL_RUOTE = {
 }
 
 # --- FUNZIONI DI GENERAZIONE FORMAZIONI (invariate) ---
-# (Omesse per brevità, sono identiche a prima)
 def genera_formazioni_distanza_estratto():
     diz_formazioni_distanza = {}
     for d in range(1, 46):
@@ -58,8 +58,29 @@ def genera_lista_gruppi_cadenze_ambo():
     gt = defaultdict(list); [gt[i % 10].append(i) for i in range(1, 91)]; return [sorted(gt[cn]) for cn in sorted(gt.keys())]
 def genera_lista_gruppi_quindicine_ambo(): return [list(range(i * 15 + 1, (i + 1) * 15 + 1)) for i in range(6)]
 
-# --- Funzioni di Utility (invariate) ---
-# (Omesse per brevità)
+# --- Funzioni di Utility ---
+
+def load_archivio_ruota_locale(file_path):
+    """Carica l'archivio di una ruota da un file locale."""
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+        estrazioni = []
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) >= 5:
+                try:
+                    numeri_int = [int(n) for n in parts[-5:]]
+                    if len(numeri_int) == 5:
+                        estrazioni.append(numeri_int)
+                except ValueError:
+                    continue
+        return estrazioni
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
 def load_archivio_ruota(url):
     try:
         response = requests.get(url, timeout=10); response.raise_for_status()
@@ -72,10 +93,10 @@ def load_archivio_ruota(url):
         return estrazioni
     except requests.RequestException: return []
     except Exception: return []
+    
 def precalcola_presenze_singoli_numeri(estrazioni_ruota): c = Counter(); [c.update(e) for e in estrazioni_ruota]; return c
 
 # --- Funzioni Core per Statistiche (invariate) ---
-# (Omesse per brevità)
 def calcola_statistiche_estratto(estrazioni_ruota, formazione_numeri, presenze_numeri_ruota):
     if not estrazioni_ruota: return {'Ritardo': 0, 'RitMax': 0, 'IncrRitMax': 0, 'Frequenza': 0, 'Presenze': 0, 'IndConv': float('inf'), 'Rit/RitMax': 0.0}
     fTEA, pFE, rC, idx = len(estrazioni_ruota), 0, 0, len(estrazioni_ruota) -1
@@ -180,6 +201,40 @@ class LottoApp:
         self.style.map("Accent.TButton", background=[('active', '#45a049')])
         self.style.configure("Small.TButton", padding=(5,3), font=("Helvetica", 9))
 
+        # --- INIZIO: NUOVA SEZIONE FONTE DATI ---
+        data_source_lf = ttk.Labelframe(root, text="Fonte Dati", padding="10")
+        data_source_lf.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        self.data_source_var = tk.StringVar(value="online") # 'online' o 'local'
+
+        source_controls_frame = ttk.Frame(data_source_lf)
+        source_controls_frame.pack(fill=tk.X, expand=True)
+
+        online_rb = ttk.Radiobutton(source_controls_frame, text="Online (GitHub)", variable=self.data_source_var, value="online", command=self._toggle_local_folder_controls)
+        online_rb.pack(side=tk.LEFT, padx=(0, 20))
+
+        local_rb = ttk.Radiobutton(source_controls_frame, text="Cartella Locale", variable=self.data_source_var, value="local", command=self._toggle_local_folder_controls)
+        local_rb.pack(side=tk.LEFT)
+
+        local_path_frame = ttk.Frame(source_controls_frame)
+        local_path_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
+
+        self.local_folder_label = ttk.Label(local_path_frame, text="Cartella Locale:")
+        self.local_folder_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.local_folder_path_var = tk.StringVar()
+        default_desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop', 'NUMERICAL_EMPATHY_COMPLETO_2025')
+        self.local_folder_path_var.set(default_desktop_path)
+        
+        self.local_folder_entry = ttk.Entry(local_path_frame, textvariable=self.local_folder_path_var, width=70)
+        self.local_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.browse_button = ttk.Button(local_path_frame, text="Sfoglia...", command=self._browse_for_folder, style="Small.TButton")
+        self.browse_button.pack(side=tk.LEFT, padx=(5, 0))
+        
+        self._toggle_local_folder_controls()
+        # --- FINE: NUOVA SEZIONE FONTE DATI ---
+
         controls_outer_frame = ttk.Frame(root, padding="10")
         controls_outer_frame.pack(fill=tk.X)
 
@@ -202,7 +257,6 @@ class LottoApp:
         analysis_buttons_lf = ttk.Labelframe(action_status_frame, text="Azioni di Analisi", padding="10")
         analysis_buttons_lf.pack(fill=tk.X, pady=(0,10))
 
-        # --- MODIFICA TESTO PULSANTI DI COMANDO ---
         self.btn_estratto_principale = ttk.Button(analysis_buttons_lf, text="Analisi per Estratto", command=lambda: self._start_analysis_runner(self._run_analisi_estratto_principale), style="Accent.TButton")
         self.btn_estratto_principale.pack(fill=tk.X, pady=2)
         
@@ -216,8 +270,6 @@ class LottoApp:
         self.btn_gruppi_terno.pack(fill=tk.X, pady=2)
         
         self.analysis_buttons = [self.btn_estratto_principale, self.btn_coppie_distanza_cmd, self.btn_gruppi_ambo, self.btn_gruppi_terno]
-        # --- FINE MODIFICA TESTO PULSANTI DI COMANDO ---
-
 
         self.status_label = ttk.Label(action_status_frame, text="Pronto.", anchor="w", font=("Helvetica", 9))
         self.status_label.pack(fill=tk.X, pady=(5,5))
@@ -237,12 +289,10 @@ class LottoApp:
         self.tab_ambo = ScrolledFrame(self.notebook)
         self.tab_terno = ScrolledFrame(self.notebook)
         
-        # --- MODIFICA TESTO SCHEDE NOTEBOOK ---
         self.notebook.add(self.tab_estratto_principale, text='Analisi per Estratto')
         self.notebook.add(self.tab_coppie_distanza, text='Estratto su Coppie a Distanza')
         self.notebook.add(self.tab_ambo, text='Gruppi per Ambo')
         self.notebook.add(self.tab_terno, text='Gruppi per Terno')
-        # --- FINE MODIFICA TESTO SCHEDE NOTEBOOK ---
         
         self.treeviews = {}
         self.cols_rep = ['Nome', 'Ruota', 'Numeri', 'Ritardo', 'RitMax', 'IncrRitMax', 'Frequenza', 'Presenze', 'IndConv', 'Rit/RitMax']
@@ -255,7 +305,20 @@ class LottoApp:
 
         self.pregenerate_formations()
 
-    def pregenerate_formations(self): # Logica interna invariata
+    def _toggle_local_folder_controls(self):
+        """Abilita o disabilita i controlli per la cartella locale."""
+        state = tk.NORMAL if self.data_source_var.get() == "local" else tk.DISABLED
+        self.local_folder_label.config(state=state)
+        self.local_folder_entry.config(state=state)
+        self.browse_button.config(state=state)
+
+    def _browse_for_folder(self):
+        """Apre una finestra di dialogo per selezionare una cartella."""
+        folder_selected = filedialog.askdirectory(title="Seleziona la cartella degli archivi")
+        if folder_selected:
+            self.local_folder_path_var.set(folder_selected)
+            
+    def pregenerate_formations(self):
         self.KEY_ESTRATTI_SEMPLICI = "EstrattiSemplici"
         self.formazioni_estratto_principale_keys = [
             self.KEY_ESTRATTI_SEMPLICI, 
@@ -269,7 +332,7 @@ class LottoApp:
         formazioni_per_distanza = genera_formazioni_distanza_estratto()
         all_estratto_defs.update(formazioni_per_distanza)
         self.formazioni_estratto_defs = all_estratto_defs
-        self.nomi_display_estratto = { # I nomi per i titoli dei Treeview rimangono più descrittivi
+        self.nomi_display_estratto = {
             self.KEY_ESTRATTI_SEMPLICI: "Estratti Semplici (Top 10 Rit. Globali)", 
             "VertibiliE": "Coppie Vertibili",
             "DiametraliE": "Diametrali", 
@@ -293,19 +356,21 @@ class LottoApp:
             "Figure": "Figure (Terno)", "Cadenze": "Cadenze (Terno)", "Quindicine": "Quindicine (Terno)"
         }
 
-    # ... (tutti gli altri metodi: select_all_ruote, _append_log, update_status, create_treeview_in_tab, fmt_flt_for_gui, populate_treeview, _set_buttons_state, _start_analysis_runner, _ensure_archivi_caricati_sync, _clear_treeviews_for_keys, _run_analisi_estratto_principale, _run_analisi_coppie_distanza, _run_analisi_gruppi_ambo, _run_analisi_gruppi_terno sono INVARIATI rispetto all'ultima versione completa e OMESSI PER BREVITÀ qui, ma devono essere presenti nel file finale)
     def select_all_ruote(self, select_state):
         for var in self.ruote_vars.values(): var.set(select_state)
+    
     def _append_log(self, message):
         self.log_text_area.config(state=tk.NORMAL)
         self.log_text_area.insert(tk.END, message + "\n")
         self.log_text_area.see(tk.END)
         self.log_text_area.config(state=tk.DISABLED)
         self.root.update_idletasks()
+
     def update_status(self, message, progress_value=None):
         self.status_label.config(text=message)
         if progress_value is not None: self.progress_bar['value'] = progress_value
         self.root.update_idletasks()
+
     def create_treeview_in_tab(self, scrolled_tab_frame, category_title):
         outer_frame = ttk.Frame(scrolled_tab_frame.interior) 
         outer_frame.pack(pady=(5,10), padx=5, fill=tk.X, expand=False) 
@@ -330,6 +395,7 @@ class LottoApp:
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y); hsb.pack(side=tk.BOTTOM, fill=tk.X)
         tree.pack(fill=tk.BOTH, expand=True); return tree
+    
     def fmt_flt_for_gui(self, x):
         if pd.isna(x): return 'NaN'
         if x == float('inf'): return 'inf'
@@ -340,11 +406,8 @@ class LottoApp:
     def populate_treeview(self, tree, df, cols_to_format_float):
         if tree is None: return 
         
-        # Configura i tag
-        tree.tag_configure('ritardo_max_raggiunto', foreground='#D32F2F', font=tkfont.Font(weight="bold")) # Rosso scuro, grassetto
-        # --- MODIFICA COLORE E FONT PER IL VERDE ---
-        tree.tag_configure('vicino_ritardo_max', foreground='#4CAF50', font=tkfont.Font(weight="bold")) # Verde brillante (come i pulsanti), grassetto
-        # --- FINE MODIFICA ---
+        tree.tag_configure('ritardo_max_raggiunto', foreground='#D32F2F', font=tkfont.Font(weight="bold"))
+        tree.tag_configure('vicino_ritardo_max', foreground='#4CAF50', font=tkfont.Font(weight="bold"))
 
         for item in tree.get_children(): tree.delete(item)
         
@@ -361,37 +424,25 @@ class LottoApp:
         
         for index, row in df.iterrows(): 
             tag_to_apply = () 
-
-            ritardo_val = row['Ritardo']
-            ritmax_val = row['RitMax']
-
+            ritardo_val = row['Ritardo']; ritmax_val = row['RitMax']
             is_numeric_ritardo = isinstance(ritardo_val, (int, float))
             is_numeric_ritmax = isinstance(ritmax_val, (int, float))
-
             if is_numeric_ritardo and is_numeric_ritmax:
-                if ritmax_val > 0 and ritardo_val == ritmax_val:
-                    tag_to_apply = ('ritardo_max_raggiunto',)
-                elif ritmax_val > 0 and ritardo_val >= 0.85 * ritmax_val and ritardo_val < ritmax_val: 
-                    tag_to_apply = ('vicino_ritardo_max',)
+                if ritmax_val > 0 and ritardo_val == ritmax_val: tag_to_apply = ('ritardo_max_raggiunto',)
+                elif ritmax_val > 0 and ritardo_val >= 0.85 * ritmax_val and ritardo_val < ritmax_val: tag_to_apply = ('vicino_ritardo_max',)
             
             display_values = []
             for col_name in self.cols_rep:
                 if col_name in df_display.columns:
-                    # Usa il valore da df_display se la colonna è stata formattata
-                    # Questo è importante per le colonne float
-                    if col_name in cols_to_format_float:
-                         display_values.append(df_display.loc[index, col_name])
-                    else: # Per colonne non float (come Nome, Ruota, Numeri interi non formattati) usa il valore originale
-                         display_values.append(row[col_name])
-                elif col_name in row: 
-                    display_values.append(row[col_name])
-                else:
-                    display_values.append("") 
-
+                    if col_name in cols_to_format_float: display_values.append(df_display.loc[index, col_name])
+                    else: display_values.append(row[col_name])
+                elif col_name in row: display_values.append(row[col_name])
+                else: display_values.append("") 
             tree.insert("", tk.END, values=display_values, tags=tag_to_apply)
 
     def _set_buttons_state(self, state):
         for btn in self.analysis_buttons: btn.config(state=state)
+    
     def _start_analysis_runner(self, analysis_function_to_run):
         self._set_buttons_state(tk.DISABLED)
         self.progress_bar['value'] = 0
@@ -411,42 +462,79 @@ class LottoApp:
                 self._set_buttons_state(tk.NORMAL)
                 self.progress_bar['value'] = 0
         analysis_thread = threading.Thread(target=threaded_task); analysis_thread.daemon = True; analysis_thread.start()
+
     def _ensure_archivi_caricati_sync(self):
         current_selected_sigle = {sigla for sigla, var in self.ruote_vars.items() if var.get()}
         if not current_selected_sigle:
             self.root.after(0, lambda: messagebox.showwarning("Selezione mancante", "Selezionare almeno una ruota."))
             return False
-        if self.archivi_caricati_per_sigle == current_selected_sigle and self.archivi_ruote:
-            self.root.after(0, lambda: self._append_log("Archivi già caricati per le ruote selezionate."))
+        
+        source_type = self.data_source_var.get()
+        last_source_used = getattr(self, 'last_source_used', None)
+        
+        if self.archivi_caricati_per_sigle == current_selected_sigle and last_source_used == source_type and self.archivi_ruote:
+            self.root.after(0, lambda: self._append_log("Archivi già caricati per la fonte e le ruote selezionate."))
             return True
+
         self.root.after(0, lambda: self.update_status("Caricamento archivi...", 5))
         self.archivi_ruote.clear(); self.presenze_singoli_per_ruota.clear(); self.archivi_caricati_per_sigle.clear()
+        
         ruote_da_caricare = {sigla: RUOTE_DISPONIBILI[sigla] for sigla in current_selected_sigle}
         total_ruote_to_load = len(ruote_da_caricare); loaded_count = 0
         progress_per_ruota_load = 50 / total_ruote_to_load if total_ruote_to_load > 0 else 0
+        
+        local_path = ""
+        if source_type == 'local':
+            local_path = self.local_folder_path_var.get()
+            if not os.path.isdir(local_path):
+                self.root.after(0, lambda: messagebox.showerror("Errore Percorso", f"La cartella specificata non esiste:\n{local_path}"))
+                self.root.after(0, lambda: self.update_status("Errore: cartella locale non trovata.", 0))
+                return False
+            self.root.after(0, lambda p=local_path: self._append_log(f"Caricamento da cartella locale: {p}"))
+        else:
+            self.root.after(0, lambda: self._append_log("Caricamento da GitHub..."))
+
         for sigla_r, nome_r_comp in ruote_da_caricare.items():
             self.root.after(0, lambda s=sigla_r, n=nome_r_comp, lc=loaded_count, pprl=progress_per_ruota_load: self.update_status(f"Caricamento: {n}...", 5 + (lc * pprl)))
             self.root.after(0, lambda n=nome_r_comp: self._append_log(f" Tentativo caricamento: {n}..."))
-            est = load_archivio_ruota(URL_RUOTE[sigla_r])
+            
+            est = []
+            log_msg_fail = f"  FALLITO: Nessun dato per {nome_r_comp}."
+            if source_type == 'online':
+                est = load_archivio_ruota(URL_RUOTE[sigla_r])
+            else: # 'local'
+                file_name = f"{nome_r_comp.upper()}.txt"
+                full_file_path = os.path.join(local_path, file_name)
+                est = load_archivio_ruota_locale(full_file_path)
+                log_msg_fail = f"  FALLITO o VUOTO: Nessun dato per {nome_r_comp} (file: {file_name})."
+
             if est:
                 self.archivi_ruote[nome_r_comp] = est
                 self.presenze_singoli_per_ruota[nome_r_comp] = precalcola_presenze_singoli_numeri(est)
                 self.archivi_caricati_per_sigle.add(sigla_r)
                 self.root.after(0, lambda n=nome_r_comp, l=len(est): self._append_log(f"  OK: {n} ({l} estrazioni)."))
-            else: self.root.after(0, lambda n=nome_r_comp: self._append_log(f"  FALLITO: Nessun dato per {n}."))
+            else:
+                self.root.after(0, lambda msg=log_msg_fail: self._append_log(msg))
+            
             loaded_count += 1
+        
+        self.last_source_used = source_type
+
         if not self.archivi_ruote:
             self.root.after(0, lambda: self.update_status("Errore: Nessun archivio caricato.", 0))
-            self.root.after(0, lambda: messagebox.showerror("Errore", "Nessun archivio caricato."))
+            self.root.after(0, lambda: messagebox.showerror("Errore", "Nessun archivio è stato caricato. Controllare la fonte dati e la selezione delle ruote."))
             return False
+            
         self.root.after(0, lambda: self._append_log("Caricamento archivi completato."))
         return True
+
     def _clear_treeviews_for_keys(self, keys_to_clear, target_tab_interior=None):
         for key in keys_to_clear:
             if key in self.treeviews:
                 if target_tab_interior is None or self.treeviews[key].master.master.master == target_tab_interior:
                     for item in self.treeviews[key].get_children(): 
                         self.treeviews[key].delete(item)
+
     def _run_analisi_estratto_principale(self):
         self.notebook.select(self.tab_estratto_principale)
         self._clear_treeviews_for_keys(self.formazioni_estratto_principale_keys, self.tab_estratto_principale.interior) 
@@ -496,6 +584,7 @@ class LottoApp:
                 else: df_display = pd.DataFrame(current_results_for_category).sort_values(by=['Ritardo','RitMax'], ascending=[False,False]).head(10)
                 self.root.after(0, lambda tv=self.treeviews.get(k_tipo), d=df_display: self.populate_treeview(tv, d, ['IndConv','Rit/RitMax']))
             current_results_for_category.clear()
+
     def _run_analisi_coppie_distanza(self):
         self.notebook.select(self.tab_coppie_distanza)
         self._clear_treeviews_for_keys(self.formazioni_estratto_distanza_keys, self.tab_coppie_distanza.interior)
@@ -527,6 +616,7 @@ class LottoApp:
                 df = pd.DataFrame(current_results_for_category).sort_values(by=['Ritardo','RitMax'], ascending=[False,False]).head(10)
                 self.root.after(0, lambda tv=self.treeviews.get(k_tipo), d=df: self.populate_treeview(tv, d, ['IndConv','Rit/RitMax']))
             current_results_for_category.clear()
+            
     def _run_analisi_gruppi_ambo(self):
         self.notebook.select(self.tab_ambo)
         self._clear_treeviews_for_keys(self.categorie_gruppi_amboterno_defs.keys(), self.tab_ambo.interior)
@@ -555,6 +645,7 @@ class LottoApp:
                 df = pd.DataFrame(current_results_for_category).sort_values(by=['Ritardo','RitMax'], ascending=[False,False]).head(10)
                 self.root.after(0, lambda tv=self.treeviews.get(categoria_gruppo), d=df: self.populate_treeview(tv, d, ['IndConv','Rit/RitMax']))
             current_results_for_category.clear()
+
     def _run_analisi_gruppi_terno(self):
         self.notebook.select(self.tab_terno)
         keys_terno = [f"{k}_Terno" for k in self.categorie_gruppi_amboterno_defs.keys()]

@@ -349,7 +349,7 @@ def genera_previsione_lotto(model, X_input_last_sequence, num_predictions=5, log
              if log_callback: log_callback(f"ERRORE Shape: Input {input_reshaped.shape[1]} != Modello {expected_features}."); return None
 
         # Esecuzione Previsione
-        probabilities = model.predict(input_reshaped)
+        probabilities = model.predict(input_reshaped, verbose=0)
 
         # --- CORREZIONE INDENTAZIONE QUI ---
         if probabilities is None or probabilities.size == 0:
@@ -472,7 +472,7 @@ def analisi_lotto(folder_path, calculation_wheels, game_wheels,
             model_fold = build_model_lotto(input_shape_lotto, hidden_layers_config, loss_function, optimizer, dropout_rate, l1_reg, l2_reg, log_callback)
             if model_fold is None: raise ValueError("Costruzione modello fold fallita.")
 
-            early_stopping_fold = EarlyStopping(monitor='val_loss', patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=1)
+            early_stopping_fold = EarlyStopping(monitor='val_loss', patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=0)
             gui_log_callback_fold = LogCallback(log_callback)
 
             if log_callback: log_callback(f"Fold {fold_idx+1}: Addestramento (Train:{len(X_train_fold)}, Val:{len(X_val_fold)})...")
