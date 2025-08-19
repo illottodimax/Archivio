@@ -5,8 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lotto App di Max</title>
     <meta name="theme-color" content="#2563eb">
-    <link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiTG90dG8gQXBwIiwic2hvcnRfbmFtZSI6IkxvdHRvIiwic3RhcnRfdXJsIjoiLiIsImRpc3BsYXkiOiJzdGFuZGFsb25lIiwiYmFja2dyb3VuZF9jb2xvciI6IiNmZmZmZmYiLCJ0aGVtZV9jb2xvciI6IiMyNTYzZWIiLCJpY29ucyI6W3sic3JjIjoiZGF0YTppbWFnZS9zdmcreG1sO2Jhc2U2NCxQSE4yWnlCM2FXUjBhRDBpTVRJNElpQm9aV2xuYUhROUlqRXlPQ0lpSUhacFpYZENiM2c5SWpBZ01DQXhNamd1TURBZ01USTRMakF3SWlCNGJXeHVjejBpYUhSMGNEb3ZMM2QzZHk1M00zVnVaeTVQY21jdk1qQXdNQzl6ZG1jaUlHWnBiR3c5SWlNeU5UWXpaV0lpUGp4eVpXTjBJSGRwWkhSb1BTSXhNamdpSUdobGFXZG9kRDBpTVRJNElpQm1hV3hzUFNJalpqUm1PR1FpTHo0OGRHVjRkQ0I0UFNJMk5DSWdlVDBpT0RRaUlHWnBiR3c5SW1acFpteG1abVlpSUdadmJuUXRabUZ0YVd4NUNTQXRNV3R3YUdWdGFYVnRMWGhKSUhOaGJuTXRjMlZ5YVdZaUlHWnZiblF0YzJsNlpUMGlOREFpUGprd04xZDhQQzkwWlhoMFBqeDBaWGgwSUdnaFBTSTJOQ0lnZVQwaU1UQTBJaUJtYVd4c1BTSm1abVptWm1ZaUlHWnZiblF0Wm1GdGFXeDVQU0l0TVd0d2FHVnRhWFZ0TFhoSklITmhibk10YzJWeWFXWWlJR1p2Ym5RdGMybDZaVDBpTXpJaVBrNWhkSGx4UGlZOGRHVjRkQ0JvUVQwaU5qUWlJSGs5SWpFeU5DSWdabWxzYkQwaVptWm1abVlpSUdadmJuUXRabUZ0YVd4NVBTSXRNV3R3YUdWdGFYVnRMWGhKSUhOaGJuTXRjMlZ5YVdZaUlHWnZiblF0YzJsNlpUMGlNalFpUGpCdGVIY2dOelpnUVhkcVkyTlNUaWc4TDNSbGVIUStQQzl6ZG1jKyIsInNpemVzIjoiMTI4eDEyOCJ9XX0=">
+    
+    <!-- MODIFICA #1: Link al nuovo file manifest.json -->
+    <link rel="manifest" href="manifest.json">
+    
     <style>
+        /* ... tutto il tuo CSS rimane identico ... */
         :root {
             --primary-color: #2563eb;
             --secondary-color: #764ba2;
@@ -64,7 +68,6 @@
         .stat-label { color: #666; font-size: 0.8rem; }
         .error { background: #ffebee; color: #c62828; padding: 20px; border-radius: 12px; text-align: center; }
         
-        /* Stili per le nuove funzionalità */
         .input-group { display: flex; gap: 10px; margin-bottom: 15px; }
         .input-group input { flex-grow: 1; padding: 12px; border-radius: 8px; border: 1px solid #ddd; font-size: 1rem; }
         .action-btn {
@@ -90,6 +93,7 @@
     </style>
 </head>
 <body>
+    <!-- ... tutto il tuo HTML Body rimane identico ... -->
     <div class="container">
         <div class="header">
             <h1>🎱 IL LOTTO DI MAX</h1>
@@ -113,54 +117,50 @@
             </div>
         </div>
 
-        <!-- NUOVA CARD: STORICO ESTRAZIONI -->
         <div class="card">
             <h2 style="margin-bottom: 20px;">Storico Ultime Estrazioni</h2>
-            <div id="history-content">
-                <!-- Contenuto generato da JS -->
-            </div>
+            <div id="history-content"></div>
         </div>
 
-        <!-- CARD STATISTICHE (invariata) -->
         <div class="card">
             <h2 style="margin-bottom: 20px;">Statistiche Ruota</h2>
-            <div id="stats-content" class="stats">
-                <!-- Contenuto generato da JS -->
-            </div>
+            <div id="stats-content" class="stats"></div>
         </div>
 
-        <!-- NUOVA CARD: GENERATORE NUMERI -->
         <div class="card">
             <h2 style="margin-bottom: 20px;">Generatore Numeri</h2>
             <div class="generator-btns">
                 <button id="random-gen-btn" class="action-btn generator-btn btn-random">Casuale</button>
                 <button id="smart-gen-btn" class="action-btn generator-btn btn-smart">Intelligente</button>
             </div>
-            <div id="generator-results">
-                 <!-- Numeri generati appariranno qui -->
-            </div>
+            <div id="generator-results"></div>
         </div>
 
-        <!-- NUOVA CARD: CERCA NUMERO -->
         <div class="card">
             <h2 style="margin-bottom: 20px;">Cerca un Numero</h2>
             <div class="input-group">
                 <input type="number" id="searchInput" placeholder="Numero (1-90)" min="1" max="90">
                 <button id="searchBtn" class="action-btn">Cerca</button>
             </div>
-            <div id="searchResults">
-                <!-- Risultati ricerca appariranno qui -->
-            </div>
+            <div id="searchResults"></div>
         </div>
 
     </div>
 
     <script>
+        // MODIFICA #2: Registra il nuovo file sw.js all'inizio
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.register('sw.js')
+            .then(reg => console.log('Service Worker registrato con successo', reg))
+            .catch(err => console.log('Errore durante la registrazione del Service Worker', err));
+        }
+
         class LottoApp {
+            // ... tutto il tuo codice della classe LottoApp rimane identico ...
             constructor() {
                 this.currentWheel = 'BA';
-                this.allLines = []; // Conterrà tutte le linee del file per la ruota corrente
-                this.stats = {};    // Conterrà le statistiche calcolate
+                this.allLines = [];
+                this.stats = {};
                 this.urlRuote = {
                     'BA': 'https://raw.githubusercontent.com/illottodimax/Archivio/main/BARI.txt',
                     'CA': 'https://raw.githubusercontent.com/illottodimax/Archivio/main/CAGLIARI.txt',
@@ -180,7 +180,6 @@
             }
 
             initEventListeners() {
-                // Selezione Ruota
                 document.querySelectorAll('.wheel-btn').forEach(btn => {
                     btn.addEventListener('click', (e) => {
                         document.querySelector('.wheel-btn.active').classList.remove('active');
@@ -189,12 +188,8 @@
                         this.loadDataForWheel();
                     });
                 });
-                
-                // Pulsanti Generatore
                 document.getElementById('random-gen-btn').addEventListener('click', () => this.generateNumbers('random'));
                 document.getElementById('smart-gen-btn').addEventListener('click', () => this.generateNumbers('smart'));
-                
-                // Pulsante Cerca
                 document.getElementById('searchBtn').addEventListener('click', () => this.searchNumber());
             }
 
@@ -216,7 +211,6 @@
                     
                     if (this.allLines.length === 0) throw new Error('File dati vuoto');
                     
-                    // Una volta caricati i dati, popola tutte le sezioni
                     this.displayHistory();
                     this.calculateStats();
                     
@@ -228,7 +222,7 @@
 
             displayHistory() {
                 const historyContent = document.getElementById('history-content');
-                const last5Extractions = this.allLines.slice(-5).reverse(); // Ultime 5, più recente in alto
+                const last5Extractions = this.allLines.slice(-5).reverse();
                 
                 let html = '';
                 last5Extractions.forEach(line => {
@@ -268,14 +262,12 @@
                 const frequency = {};
                 allNumbers.forEach(num => frequency[num] = (frequency[num] || 0) + 1);
 
-                // Trova più frequente e più ritardatario e salva per il generatore
                 this.stats.frequenti = Object.entries(frequency).sort((a, b) => b[1] - a[1]);
                 this.stats.ritardatari = Object.entries(ritardi).sort((a, b) => b[1] - a[1]);
 
                 const [mostFrequentNum, maxCount] = this.stats.frequenti[0];
                 const [mostDelayedNum, maxDelay] = this.stats.ritardatari[0];
 
-                // Mostra a schermo
                 const statsContent = document.getElementById('stats-content');
                 statsContent.innerHTML = `
                     <div class="stat-item">
@@ -302,8 +294,7 @@
                         generated.add(Math.floor(Math.random() * 90) + 1);
                     }
                 } else if (type === 'smart') {
-                    // Logica "Intelligente": 2 più ritardatari, 2 più frequenti, 1 casuale
-                    if (!this.stats.frequenti || !this.stats.ritardatari) return; // Dati non ancora pronti
+                    if (!this.stats.frequenti || !this.stats.ritardatari) return;
                     generated.add(parseInt(this.stats.ritardatari[0][0]));
                     generated.add(parseInt(this.stats.ritardatari[1][0]));
                     generated.add(parseInt(this.stats.frequenti[0][0]));
@@ -348,7 +339,7 @@
                 return dateStr;
             }
         }
-
+        
         document.addEventListener('DOMContentLoaded', () => {
             new LottoApp();
         });
