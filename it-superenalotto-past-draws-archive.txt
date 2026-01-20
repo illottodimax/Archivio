@@ -1,5 +1,6 @@
 Archivio estrazioni SuperEnalotto
 Data	SERIE							JOLLY	Superstar
+2026-01-20	08	13	25	60	72	74		78	34
 2026-01-17	03	07	41	56	65	83		79	82
 2026-01-16	14	21	24	52	80	86		57	14
 2026-01-15	44	49	60	69	73	85		36	01
